@@ -84,17 +84,29 @@ func trustedPath(path string) error {
 // trustedAncestors checks the directories a path passes through.
 //
 // A file's own ownership is not enough. A root-owned, root-only-writable binary
-// sitting in a directory anyone can write to can be renamed away and replaced
-// between the check and the exec — the classic swap, and this package hands
-// what it checks straight to exec.CommandContext. So every directory from the
-// root down has to be owned by root or by us, and writable by nobody else.
+// sitting in a directory someone else can write to can be renamed away and
+// replaced between the check and the exec — the classic swap, and this package
+// hands what it checks straight to exec.CommandContext.
 //
-// A world-writable directory with the sticky bit set (/tmp) is accepted, because
-// the sticky bit is exactly the mitigation for this attack: with +t only the
-// owner of an entry may rename or remove it, so the swap the check exists to
-// prevent cannot happen. Refusing it would be refusing a defence rather than a
-// hole.
+// The strict form applies when running as root, which is the threat this
+// guards: an unprivileged local user arranging for a root process to execute
+// something of theirs. Every ancestor must then be owned by root and writable by
+// nobody else.
+//
+// Running as an ordinary user, only world-writable-without-sticky is refused.
+// The escalation is not available — anyone who could swap a directory we own
+// could equally run their own code as us — and the strict rule costs a great
+// deal for nothing: Homebrew installs its whole tree group-writable, so
+// /opt/homebrew/Cellar is 0775 and every php-fpm on a Mac would be refused
+// outright. Observed exactly that, on a machine where the binary was perfectly
+// legitimate.
+//
+// A world-writable directory with the sticky bit set (/tmp) is accepted either
+// way. The sticky bit is the mitigation for this attack: with +t only the owner
+// of an entry may rename or remove it, so the swap cannot happen. Refusing it
+// would be refusing a defence rather than a hole.
 func trustedAncestors(path string) error {
+	strict := os.Getuid() == 0
 	dir := filepath.Dir(filepath.Clean(path))
 
 	for {
@@ -107,11 +119,21 @@ func trustedAncestors(path string) error {
 		if !ok {
 			return fmt.Errorf("cannot determine ownership of %s", dir)
 		}
-		if uid := os.Getuid(); stat.Uid != 0 && uint64(stat.Uid) != uint64(uid) {
-			return fmt.Errorf("%s is inside %s, which is owned by uid %d", path, dir, stat.Uid)
-		}
-		if perm := info.Mode().Perm(); perm&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
-			return fmt.Errorf("%s is inside %s, which is writable by others (%#o) without the sticky bit",
+
+		sticky := info.Mode()&os.ModeSticky != 0
+		perm := info.Mode().Perm()
+
+		if strict {
+			if stat.Uid != 0 {
+				return fmt.Errorf("%s is inside %s, which is owned by uid %d rather than root",
+					path, dir, stat.Uid)
+			}
+			if perm&0o022 != 0 && !sticky {
+				return fmt.Errorf("%s is inside %s, which is writable by others (%#o) without the sticky bit",
+					path, dir, perm)
+			}
+		} else if perm&0o002 != 0 && !sticky {
+			return fmt.Errorf("%s is inside %s, which is world-writable (%#o) without the sticky bit",
 				path, dir, perm)
 		}
 
