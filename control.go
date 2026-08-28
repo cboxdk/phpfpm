@@ -72,43 +72,114 @@ func Reload(pid int) error {
 	return nil
 }
 
-// ReloadAndWait reloads a master and waits for it to come back.
+// ReloadTarget identifies a master well enough to recognise it after a reload.
+//
+// The pid alone is not enough, because a reload does not always preserve it.
+type ReloadTarget struct {
+	// PID is the master to signal.
+	PID int
+
+	// PIDFile and ConfigPath are how the master is found again if it comes back
+	// under a different pid. Either is sufficient; both are better.
+	PIDFile    string
+	ConfigPath string
+}
+
+// ReloadAndWait reloads a master and waits for it to come back, returning the
+// pid it came back as.
 //
 // A reload that kills the master is the failure this exists to detect: Reload
-// itself returns nil as soon as the signal is delivered, which is well before
-// the master has re-read anything. Callers that are about to rely on the new
-// configuration — or that need to know whether to roll back — need the
-// confirmation rather than the delivery.
+// returns as soon as the signal is delivered, which is well before the master
+// has re-read anything.
 //
-// Liveness is checked with signal 0, which tests for the process without
-// delivering anything.
-func ReloadAndWait(ctx context.Context, pid int, settle time.Duration, log *slog.Logger) error {
+// The returned pid may differ from the one signalled, and that is the whole
+// subtlety. SIGUSR2 makes the master re-exec itself. When php-fpm runs in the
+// foreground — under systemd, or as pid 1 in a container — the pid survives.
+// When it runs DAEMONIZED, which is php-fpm's own default, the re-exec produces
+// a new process and the original exits.
+//
+// Watching the original pid therefore reported a perfectly successful reload as
+// a dead master. Observed on a stock homebrew php-fpm: the log said "using
+// inherited socket" and "ready to handle connections" under a new pid while the
+// caller rolled the change back and told the operator its master had died.
+//
+// So the confirmation is about the MASTER, not the number: the original pid
+// surviving is one way to see it, and a successor that owns the same config is
+// the other.
+func ReloadAndWait(ctx context.Context, target ReloadTarget, settle time.Duration, log *slog.Logger) (int, error) {
 	log = logOrDiscard(log)
 
-	if err := Reload(pid); err != nil {
-		return err
+	if err := Reload(target.PID); err != nil {
+		return 0, err
 	}
 
-	log.Debug("Reloaded php-fpm master", "pid", pid, "settle", settle)
+	log.Debug("Reloaded php-fpm master", "pid", target.PID, "settle", settle)
 
 	deadline := time.Now().Add(settle)
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return 0, err
 		}
-		if !processAlive(pid) {
-			return fmt.Errorf("php-fpm master %d exited during reload", pid)
-		}
-		if time.Now().After(deadline) {
-			return nil
+
+		switch {
+		case processAlive(target.PID):
+			// Still the same process. Keep watching until the settle window is
+			// over: a master that fails to re-read its configuration dies a
+			// moment after the signal, not instantly.
+			if time.Now().After(deadline) {
+				return target.PID, nil
+			}
+
+		default:
+			// The pid is gone. Either the master died, or it re-execed into a
+			// new one — indistinguishable from here, so go and look.
+			if pid, ok := successor(target, log); ok {
+				log.Info("The master came back under a new pid, as a daemonized reload does",
+					"was", target.PID, "now", pid)
+
+				return pid, nil
+			}
+			if time.Now().After(deadline) {
+				return 0, fmt.Errorf("php-fpm master %d exited during reload and no master took its place",
+					target.PID)
+			}
 		}
 
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return 0, ctx.Err()
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+// successor looks for the master that replaced one that has gone.
+func successor(target ReloadTarget, log *slog.Logger) (int, bool) {
+	if target.PIDFile != "" {
+		if pid, err := MasterPID(target.PIDFile); err == nil && pid != target.PID {
+			return pid, true
+		}
+	}
+
+	if target.ConfigPath == "" {
+		return 0, false
+	}
+
+	// No pid file, or one not yet rewritten: scan for a master serving the same
+	// configuration. Matching on the config is what makes this safe on a host
+	// running several masters — a different one being alive says nothing about
+	// whether ours came back.
+	found, err := Discover(log)
+	if err != nil {
+		return 0, false
+	}
+	for _, d := range found {
+		if d.ConfigPath == target.ConfigPath && d.PID > 0 && d.PID != target.PID {
+			return d.PID, true
+		}
+	}
+
+	return 0, false
 }
 
 // ErrNotAMaster reports that a pid is not a php-fpm master process.

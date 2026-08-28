@@ -134,7 +134,7 @@ func TestReloadAndWaitReportsAMasterThatDies(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _, _ = cmd.Process.Wait(); close(done) }()
 
-	err := ReloadAndWait(context.Background(), cmd.Process.Pid, 2*time.Second, nil)
+	_, err := ReloadAndWait(context.Background(), ReloadTarget{PID: cmd.Process.Pid}, 2*time.Second, nil)
 	<-done
 
 	if err == nil {
@@ -146,7 +146,7 @@ func TestReloadAndWaitReportsAMasterThatDies(t *testing.T) {
 func TestReloadAndWaitAcceptsAMasterThatSurvives(t *testing.T) {
 	cmd := startSignalTarget(t, "trap ':' USR2", t.TempDir())
 
-	if err := ReloadAndWait(context.Background(), cmd.Process.Pid, 300*time.Millisecond, nil); err != nil {
+	if _, err := ReloadAndWait(context.Background(), ReloadTarget{PID: cmd.Process.Pid}, 300*time.Millisecond, nil); err != nil {
 		t.Errorf("a surviving master was reported as a failure: %v", err)
 	}
 }
@@ -303,4 +303,62 @@ func waitFor(t *testing.T, budget time.Duration, cond func() bool) bool {
 	}
 
 	return cond()
+}
+
+// TestReloadAndWaitAcceptsAMasterThatCameBackWithANewPID.
+//
+// SIGUSR2 makes the master re-exec itself. In the foreground — under systemd, or
+// as pid 1 in a container — the pid survives. DAEMONIZED, which is php-fpm's own
+// default, the re-exec produces a new process and the original exits.
+//
+// Watching the original pid therefore reported a perfectly successful reload as
+// a dead master. Observed on a stock homebrew php-fpm: the log said "using
+// inherited socket" and "ready to handle connections" under a new pid while the
+// caller rolled the change back and told the operator its master had died.
+func TestReloadAndWaitAcceptsAMasterThatCameBackWithANewPID(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "fpm.pid")
+
+	// Exits on USR2 after writing a SUCCESSOR's pid to the pid file, which is
+	// what a daemonized reload looks like from outside.
+	successorProc := startSignalTarget(t, "trap ':' USR2", t.TempDir())
+	if err := os.WriteFile(pidFile,
+		[]byte(strconv.Itoa(successorProc.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dying := startSignalTarget(t, "trap 'exit 0' USR2", t.TempDir())
+	done := make(chan struct{})
+	go func() { _, _ = dying.Process.Wait(); close(done) }()
+
+	pid, err := ReloadAndWait(context.Background(),
+		ReloadTarget{PID: dying.Process.Pid, PIDFile: pidFile}, 2*time.Second, nil)
+	<-done
+
+	if err != nil {
+		t.Fatalf("a master that came back under a new pid was reported as dead: %v", err)
+	}
+	if pid != successorProc.Process.Pid {
+		t.Errorf("pid = %d, want the successor %d", pid, successorProc.Process.Pid)
+	}
+}
+
+// TestReloadAndWaitStillReportsAMasterWithNoSuccessor: the case above must not
+// have made the real failure invisible.
+func TestReloadAndWaitStillReportsAMasterWithNoSuccessor(t *testing.T) {
+	dir := t.TempDir()
+
+	dying := startSignalTarget(t, "trap 'exit 1' USR2", t.TempDir())
+	done := make(chan struct{})
+	go func() { _, _ = dying.Process.Wait(); close(done) }()
+
+	_, err := ReloadAndWait(context.Background(), ReloadTarget{
+		PID:     dying.Process.Pid,
+		PIDFile: filepath.Join(dir, "does-not-exist.pid"),
+	}, 500*time.Millisecond, nil)
+	<-done
+
+	if err == nil {
+		t.Error("a master that died with nothing taking its place was reported as a success")
+	}
 }
