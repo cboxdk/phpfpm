@@ -34,6 +34,16 @@ type Target struct {
 	ConfigPath string `mapstructure:"config_path"`
 	Binary     string `mapstructure:"binary"`
 
+	// MaxChildren and ProcessManager are the pool's CONFIGURED settings as
+	// discovery read them.
+	//
+	// They matter most when the pool cannot be reached. A pool whose socket
+	// refuses is not a pool that has stopped occupying memory, and a caller with
+	// no idea how large it is will hand its allocation away and overcommit the
+	// host the moment it comes back.
+	MaxChildren    int    `mapstructure:"-"`
+	ProcessManager string `mapstructure:"-"`
+
 	// PID is the master serving this pool, when it is known. Zero means unknown,
 	// not "no master".
 	PID int `mapstructure:"-"`
@@ -87,6 +97,9 @@ func TargetFromDiscovered(d Discovered) Target {
 		ConfigPath:   d.ConfigPath,
 		Binary:       d.Binary,
 		PID:          d.PID,
+
+		MaxChildren:    d.MaxChildren,
+		ProcessManager: d.ProcessManager,
 	}
 }
 

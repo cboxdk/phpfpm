@@ -7,6 +7,7 @@ import (
 	"net"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,18 @@ type Discovered struct {
 	Binary       string
 	Socket       string
 	StatusSocket string
+
+	// MaxChildren and ProcessManager are the pool's CONFIGURED settings, read
+	// from the effective configuration during discovery.
+	//
+	// Carried because a caller that cannot reach a pool still needs them. A pool
+	// whose socket refuses — restarting, or briefly overloaded — is not a pool
+	// that has stopped occupying memory, and a consumer with no idea how large
+	// it is will hand its allocation to a neighbour and overcommit the host the
+	// moment it comes back. Discovery has already parsed this; throwing it away
+	// only to be unable to recover it later is the expensive kind of tidy.
+	MaxChildren    int
+	ProcessManager string
 
 	// PID is the master process serving this pool.
 	//
@@ -159,6 +172,9 @@ func Discover(log *slog.Logger) ([]Discovered, error) {
 				continue
 			}
 
+			maxChildren, _ := strconv.Atoi(strings.TrimSpace(poolConfig["pm.max_children"]))
+			processManager := strings.TrimSpace(poolConfig["pm"])
+
 			statusSocket := parseSocket(poolConfig["status_listen"], log)
 			if statusSocket == "" {
 				statusSocket = socket
@@ -181,6 +197,9 @@ func Discover(log *slog.Logger) ([]Discovered, error) {
 				Socket:       socket,
 				StatusSocket: statusSocket,
 				PID:          int(p.Pid),
+
+				MaxChildren:    maxChildren,
+				ProcessManager: processManager,
 			})
 
 			log.Debug("Discovered php-fpm pool",
