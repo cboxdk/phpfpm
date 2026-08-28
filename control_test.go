@@ -362,3 +362,27 @@ func TestReloadAndWaitStillReportsAMasterWithNoSuccessor(t *testing.T) {
 		t.Error("a master that died with nothing taking its place was reported as a success")
 	}
 }
+
+// TestReloadMasterRefusesTheWrongMaster.
+//
+// VerifyMaster on its own establishes that a pid is *a* php-fpm master. That is
+// enough on a host running one and not enough on a host running several: a
+// master can exit between discovery and the reload, and a pid handed straight
+// back to a different master would be signalled as though it were ours —
+// reloading someone else's sites into a configuration they never asked for.
+//
+// The config path is in the process title, so checking it costs nothing.
+func TestReloadMasterRefusesTheWrongMaster(t *testing.T) {
+	// A master serving /etc/php-fpm.conf, which is not the one we mean.
+	other := startSignalTarget(t, "trap ':' USR2", t.TempDir())
+
+	err := ReloadMaster(other.Process.Pid, "/etc/php/8.3/fpm/php-fpm.conf")
+	if !errors.Is(err, ErrNotAMaster) {
+		t.Errorf("a different master was reloaded as though it were ours (err = %v)", err)
+	}
+
+	// And the one that does match is still accepted.
+	if err := ReloadMaster(other.Process.Pid, "/etc/php-fpm.conf"); err != nil {
+		t.Errorf("the master serving the named configuration was refused: %v", err)
+	}
+}

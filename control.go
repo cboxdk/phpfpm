@@ -56,7 +56,23 @@ func Validate(ctx context.Context, binary, configPath string) error {
 // Callers changing pool settings should Validate first. Reload does not check
 // the configuration it is asking the master to adopt.
 func Reload(pid int) error {
-	if err := VerifyMaster(pid); err != nil {
+	return reload(pid, "")
+}
+
+// ReloadMaster is Reload for a caller that knows which master it means.
+//
+// VerifyMaster on its own only establishes that the pid is *a* php-fpm master.
+// That is enough on a host running one, and not enough on a host running
+// several: a master can exit between discovery and the reload, and a pid handed
+// straight back to a different master would be signalled as though it were ours.
+// The config path is in the process title, so checking it costs nothing and
+// makes the answer specific.
+func ReloadMaster(pid int, configPath string) error {
+	return reload(pid, configPath)
+}
+
+func reload(pid int, configPath string) error {
+	if err := verifyMaster(pid, configPath); err != nil {
 		return err
 	}
 
@@ -109,7 +125,7 @@ type ReloadTarget struct {
 func ReloadAndWait(ctx context.Context, target ReloadTarget, settle time.Duration, log *slog.Logger) (int, error) {
 	log = logOrDiscard(log)
 
-	if err := Reload(target.PID); err != nil {
+	if err := ReloadMaster(target.PID, target.ConfigPath); err != nil {
 		return 0, err
 	}
 
@@ -169,13 +185,18 @@ func successor(target ReloadTarget, log *slog.Logger) (int, bool) {
 	// configuration. Matching on the config is what makes this safe on a host
 	// running several masters — a different one being alive says nothing about
 	// whether ours came back.
-	found, err := Discover(log)
+	//
+	// DiscoverMasters rather than Discover: this runs in the middle of a reload,
+	// and Discover would execute `php-fpm -tt` against every master on the host
+	// to parse pools nobody is asking about — against a configuration that is
+	// being re-read at that exact moment.
+	found, err := DiscoverMasters(log)
 	if err != nil {
 		return 0, false
 	}
-	for _, d := range found {
-		if d.ConfigPath == target.ConfigPath && d.PID > 0 && d.PID != target.PID {
-			return d.PID, true
+	for _, m := range found {
+		if m.ConfigPath == target.ConfigPath && m.PID > 0 && m.PID != target.PID {
+			return m.PID, true
 		}
 	}
 
@@ -205,6 +226,20 @@ var ErrNotAMaster = errors.New("not a php-fpm master process")
 //
 // Checking what the process IS covers both, and costs one /proc read.
 func VerifyMaster(pid int) error {
+	return verifyMaster(pid, "")
+}
+
+// verifyMaster checks that pid is a php-fpm master, and — when configPath is
+// given — that it is the master serving THAT configuration.
+//
+// There is a residual window between this check and the signal that follows it:
+// the process could exit and the pid be reused in between. Closing it entirely
+// would need a pidfd, which does not exist on every platform this builds for.
+// It is narrow on purpose instead: the replacement would have to be a php-fpm
+// master, started in the microseconds between two adjacent syscalls, serving the
+// same configuration file. Before this existed the check was `pid <= 1`, which
+// admitted any process at all.
+func verifyMaster(pid int, configPath string) error {
 	if pid <= 0 {
 		return fmt.Errorf("%w: pid %d", ErrNotAMaster, pid)
 	}
@@ -223,6 +258,11 @@ func VerifyMaster(pid int) error {
 	// "php-fpm: master process (/path/to/php-fpm.conf)".
 	if !strings.Contains(cmdline, "master process") || !strings.Contains(cmdline, "php-fpm") {
 		return fmt.Errorf("%w: pid %d is %q", ErrNotAMaster, pid, cmdline)
+	}
+
+	if configPath != "" && !strings.Contains(cmdline, configPath) {
+		return fmt.Errorf("%w: pid %d is a php-fpm master, but for %q rather than %q",
+			ErrNotAMaster, pid, cmdline, configPath)
 	}
 
 	return nil
