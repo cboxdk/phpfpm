@@ -1,6 +1,7 @@
 package phpfpm
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -19,9 +20,23 @@ import (
 // root.
 
 // trustedPath reports whether a discovered path is safe to execute or read.
+// ErrPathMissing reports a path that is not there at all, as opposed to one
+// that is there and fails the trust checks.
+var ErrPathMissing = errors.New("path does not exist")
+
 func trustedPath(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// Not a trust failure. A master whose config path no longer exists
+			// is a leftover — a container gone, a temp directory removed — and
+			// there are usually several on any machine that has run php-fpm more
+			// than once. Distinguished so the caller can log it quietly instead
+			// of opening every run with a screen of warnings about processes
+			// nobody is asking it to manage.
+			return fmt.Errorf("%w: %s", ErrPathMissing, path)
+		}
+
 		return fmt.Errorf("cannot stat %s: %w", path, err)
 	}
 

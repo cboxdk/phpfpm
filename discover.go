@@ -1,6 +1,7 @@
 package phpfpm
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -75,12 +76,12 @@ func Discover(log *slog.Logger) ([]Discovered, error) {
 		// process whose name matches and whose command line names a config path
 		// they control. Both are about to be handed to exec.
 		if err := trustedPath(exe); err != nil {
-			log.Warn("Refusing to run discovered PHP-FPM binary",
+			logSkip(log, err, "Refusing to run discovered PHP-FPM binary",
 				"pid", p.Pid, "binary", exe, "reason", err)
 			continue
 		}
 		if err := trustedPath(config); err != nil {
-			log.Warn("Refusing to read discovered PHP-FPM config",
+			logSkip(log, err, "Refusing to read discovered PHP-FPM config",
 				"pid", p.Pid, "config", config, "reason", err)
 			continue
 		}
@@ -175,4 +176,28 @@ func extractConfigFromMaster(cmdline string) string {
 		return cmdline[start+1 : end]
 	}
 	return ""
+}
+
+// logSkip reports a process discovery passed over, at a level that matches what
+// it means.
+//
+// A path that has been REMOVED is routine: a master left behind by a container
+// that is gone, or by a directory since deleted. Any machine that has run
+// php-fpm more than once accumulates them, and warning about each one meant
+// every command opened with a screen of noise about processes the operator has
+// not asked anyone to manage — seven of them on the development machine this
+// was found on, before a single useful line.
+//
+// A path that EXISTS and fails the checks is different, and stays a warning:
+// something is running php-fpm from a binary or config this process is not
+// willing to trust, and an operator wanting that pool managed needs to know why
+// it was skipped.
+func logSkip(log *slog.Logger, err error, msg string, args ...any) {
+	if errors.Is(err, ErrPathMissing) {
+		log.Debug(msg+" (the path no longer exists; the process is a leftover)", args...)
+
+		return
+	}
+
+	log.Warn(msg, args...)
 }
