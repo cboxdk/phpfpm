@@ -14,13 +14,40 @@ var (
 	fpmConfigCacheLock sync.Mutex
 )
 
+// InvalidateConfigCache forgets the parsed configuration.
+//
+// Call it after reloading php-fpm with a changed configuration. Without it, a
+// long-running process keeps reporting the settings it saw at startup: a tool
+// that writes pool settings would never observe its own changes, and would show
+// an operator a "currently configured" value that has not been true for hours.
+//
+// Passing a binary and config path forgets just that pair; passing empty strings
+// forgets everything.
+func InvalidateConfigCache(binary, configPath string) {
+	fpmConfigCacheLock.Lock()
+	defer fpmConfigCacheLock.Unlock()
+
+	if binary == "" && configPath == "" {
+		clear(fpmConfigCache)
+
+		return
+	}
+
+	delete(fpmConfigCache, binary+"::"+configPath)
+}
+
 type EffectiveConfig struct {
 	Global map[string]string
 	Pools  map[string]map[string]string
 }
 
-// ParseFPMConfig runs `php-fpm -tt` and parses its report of the effective
+// ParseConfig runs `php-fpm -tt` and parses its report of the effective
 // configuration. Results are cached per binary+config pair.
+//
+// The cache never expires on its own, which is right for the common case — the
+// parse forks php-fpm and a scrape loop would otherwise do it every few seconds
+// — but it means a caller that CHANGES the configuration has to say so. See
+// InvalidateConfigCache.
 func ParseConfig(FPMBinaryPath string, FPMConfigPath string) (*EffectiveConfig, error) {
 	key := FPMBinaryPath + "::" + FPMConfigPath
 

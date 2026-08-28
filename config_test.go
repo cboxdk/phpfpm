@@ -461,3 +461,43 @@ func TestExportableConfigDropsEverythingNotPublished(t *testing.T) {
 		t.Errorf("Expected exactly the 3 published keys, got %d: %v", len(exported), exported)
 	}
 }
+
+// TestInvalidateConfigCache: the cache never expires on its own, which is right
+// for a scrape loop — the parse forks php-fpm — but wrong for a caller that
+// changes the configuration. Without invalidation such a caller never observes
+// its own writes, and reports a "currently configured" value that stopped being
+// true hours ago.
+func TestInvalidateConfigCache(t *testing.T) {
+	// Seed the cache directly: the point under test is the eviction, not the
+	// parse, and forking php-fpm here would make this a different test.
+	fpmConfigCacheLock.Lock()
+	fpmConfigCache["/usr/sbin/php-fpm::/etc/a.conf"] = &EffectiveConfig{Global: map[string]string{"x": "1"}}
+	fpmConfigCache["/usr/sbin/php-fpm::/etc/b.conf"] = &EffectiveConfig{Global: map[string]string{"x": "2"}}
+	fpmConfigCacheLock.Unlock()
+
+	t.Cleanup(func() { InvalidateConfigCache("", "") })
+
+	InvalidateConfigCache("/usr/sbin/php-fpm", "/etc/a.conf")
+
+	fpmConfigCacheLock.Lock()
+	_, aStill := fpmConfigCache["/usr/sbin/php-fpm::/etc/a.conf"]
+	_, bStill := fpmConfigCache["/usr/sbin/php-fpm::/etc/b.conf"]
+	fpmConfigCacheLock.Unlock()
+
+	if aStill {
+		t.Error("the named entry was not evicted")
+	}
+	if !bStill {
+		t.Error("an unrelated entry was evicted")
+	}
+
+	InvalidateConfigCache("", "")
+
+	fpmConfigCacheLock.Lock()
+	remaining := len(fpmConfigCache)
+	fpmConfigCacheLock.Unlock()
+
+	if remaining != 0 {
+		t.Errorf("%d entries survived a full invalidation", remaining)
+	}
+}
