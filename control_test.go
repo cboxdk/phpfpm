@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -62,8 +64,10 @@ func TestReloadRefusesAProcessThatIsNotAMaster(t *testing.T) {
 	}
 
 	// A live process that is not php-fpm: the pid-reuse case, and the one the
-	// old check let through.
-	cmd := exec.Command("/bin/sh", "-c", "sleep 10")
+	// old check let through. It even carries the master's title, because a
+	// substring search on the command line accepted exactly this.
+	cmd := exec.Command("/bin/sh", "-c",
+		`: "php-fpm: master process (/etc/php-fpm.conf)"; sleep 10`)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +93,7 @@ func TestReloadAcceptsAMasterThatIsPID1(t *testing.T) {
 	}
 
 	// The property without needing to BE pid 1: identity decides, not the number.
-	cmd := startSignalTarget(t, "trap ':' USR2", t.TempDir())
+	cmd := startSignalTarget(t, "ignore", t.TempDir())
 	if err := VerifyMaster(cmd.Process.Pid); err != nil {
 		t.Errorf("a process carrying the master's title was refused: %v", err)
 	}
@@ -106,7 +110,7 @@ func TestReloadDeliversSIGUSR2(t *testing.T) {
 	// exists the instant it starts, and the default action for USR2 is to
 	// terminate — so signalling too early kills it and looks like a delivery
 	// failure (or, in the death test below, like a pass).
-	cmd := startSignalTarget(t, "trap 'echo yes > "+marker+"' USR2", dir)
+	cmd := startNamedMaster(t, "marker", dir, "", marker).cmd
 
 	if err := Reload(cmd.Process.Pid); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -127,7 +131,7 @@ func TestReloadDeliversSIGUSR2(t *testing.T) {
 func TestReloadAndWaitReportsAMasterThatDies(t *testing.T) {
 	// Exits on USR2 instead of reloading, standing in for a master that cannot
 	// re-read its configuration.
-	cmd := startSignalTarget(t, "trap 'exit 1' USR2", t.TempDir())
+	cmd := startSignalTarget(t, "exit", t.TempDir())
 
 	// Reap the child as it exits, so the pid stops resolving rather than
 	// lingering as a zombie that still answers signal 0.
@@ -144,7 +148,7 @@ func TestReloadAndWaitReportsAMasterThatDies(t *testing.T) {
 
 // TestReloadAndWaitAcceptsAMasterThatSurvives is the happy path.
 func TestReloadAndWaitAcceptsAMasterThatSurvives(t *testing.T) {
-	cmd := startSignalTarget(t, "trap ':' USR2", t.TempDir())
+	cmd := startSignalTarget(t, "ignore", t.TempDir())
 
 	if _, err := ReloadAndWait(context.Background(), ReloadTarget{PID: cmd.Process.Pid}, 300*time.Millisecond, nil); err != nil {
 		t.Errorf("a surviving master was reported as a failure: %v", err)
@@ -158,7 +162,7 @@ func TestMasterPID(t *testing.T) {
 		// A live php-fpm master rather than this test binary: a pid file is only
 		// useful if what it names is still the master, and a stale one naming a
 		// recycled pid is the failure this guards.
-		master := startSignalTarget(t, "trap ':' USR2", t.TempDir())
+		master := startSignalTarget(t, "ignore", t.TempDir())
 
 		f := filepath.Join(dir, "live.pid")
 		if err := os.WriteFile(f, []byte(strconv.Itoa(master.Process.Pid)+"\n"), 0o600); err != nil {
@@ -245,18 +249,64 @@ func TestProcessAlive(t *testing.T) {
 // process, and the default disposition for SIGUSR2 is termination. Racing the
 // trap makes a delivery test fail and a death test pass, for the same reason and
 // with neither telling you so.
-func startSignalTarget(t *testing.T, trap, dir string) *exec.Cmd {
+func startSignalTarget(t *testing.T, onUSR2, dir string) *exec.Cmd {
 	t.Helper()
+
+	return startNamedMaster(t, onUSR2, dir, "", "").cmd
+}
+
+type stubMaster struct {
+	cmd        *exec.Cmd
+	configPath string
+}
+
+// startNamedMaster runs a process that passes the REAL identity check.
+//
+// VerifyMaster requires discovery-grade identity — the process name must match
+// php-fpm's, and its executable must pass the same ownership checks discovery
+// applies before running one — because a substring search on the command line is
+// trivially spoofable, and a spoofed master is accepted as a SUCCESSOR: a local
+// user could make a failed reload look survived, so nothing rolls back and the
+// real pools stay down.
+//
+// So the stub is this test binary, copied under the name php-fpm and re-executed
+// as a helper. Copying the system shell instead does not work — macOS kills a
+// copy of a signed system binary — and faking the check out would leave the only
+// thing standing between this package and SIGUSR2 to the wrong process
+// unexercised.
+func startNamedMaster(t *testing.T, onUSR2, dir, configPath, marker string) stubMaster {
+	t.Helper()
+
+	binDir := t.TempDir()
+	binary := filepath.Join(binDir, "php-fpm")
+
+	self, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Skipf("cannot read the test binary to build a stub master: %v", err)
+	}
+	if err := os.WriteFile(binary, self, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if configPath == "" {
+		configPath = filepath.Join(binDir, "php-fpm.conf")
+		if err := os.WriteFile(configPath, []byte("[global]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	ready := filepath.Join(dir, "ready")
 
-	// The no-op string at the front puts the master's process title into the
-	// shell's command line, so the stub is recognised by the same check a real
-	// master passes. Faking the check out instead would leave the one thing
-	// standing between this package and SIGUSR2 to an arbitrary process
-	// untested.
-	title := `: "php-fpm: master process (/etc/php-fpm.conf)"; `
-	cmd := exec.Command("/bin/sh", "-c", title+trap+"; touch "+ready+"; sleep 10 & wait")
+	// The title goes in as an argument so it reaches the command line, which is
+	// where the identity check reads it.
+	cmd := exec.Command(binary, "-test.run=TestStubMasterHelper",
+		"php-fpm: master process ("+configPath+")")
+	cmd.Env = append(os.Environ(),
+		"PHPFPM_STUB=1",
+		"PHPFPM_STUB_READY="+ready,
+		"PHPFPM_STUB_ON_USR2="+onUSR2,
+		"PHPFPM_STUB_MARKER="+marker,
+	)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -265,14 +315,52 @@ func startSignalTarget(t *testing.T, trap, dir string) *exec.Cmd {
 		_, _ = cmd.Process.Wait()
 	})
 
-	if !waitFor(t, 5*time.Second, func() bool {
+	// Waited for AFTER the handler is installed. The process exists the instant
+	// it starts and the default action for USR2 is to terminate, so signalling
+	// too early kills it and looks like a delivery failure.
+	if !waitFor(t, 20*time.Second, func() bool {
 		_, err := os.Stat(ready)
+
 		return err == nil
 	}) {
-		t.Fatal("the shell never signalled that its trap was installed")
+		t.Fatal("the stub master never signalled that its handler was installed")
 	}
 
-	return cmd
+	return stubMaster{cmd: cmd, configPath: configPath}
+}
+
+// TestStubMasterHelper is the stub master, running inside a copy of this test
+// binary. It is a no-op unless the environment says otherwise.
+func TestStubMasterHelper(t *testing.T) {
+	if os.Getenv("PHPFPM_STUB") != "1" {
+		t.Skip("helper process only")
+	}
+
+	got := make(chan os.Signal, 1)
+	signal.Notify(got, syscall.SIGUSR2)
+
+	if ready := os.Getenv("PHPFPM_STUB_READY"); ready != "" {
+		if err := os.WriteFile(ready, []byte("ok"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for {
+		select {
+		case <-got:
+			switch os.Getenv("PHPFPM_STUB_ON_USR2") {
+			case "exit":
+				// Stands in for a master that cannot re-read its configuration.
+				os.Exit(1)
+			case "marker":
+				if marker := os.Getenv("PHPFPM_STUB_MARKER"); marker != "" {
+					_ = os.WriteFile(marker, []byte("yes"), 0o644)
+				}
+			}
+		case <-time.After(30 * time.Second):
+			return
+		}
+	}
 }
 
 // lookupFPM finds a php-fpm binary or skips. Validate shells out, so there is
@@ -319,17 +407,24 @@ func TestReloadAndWaitAcceptsAMasterThatCameBackWithANewPID(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "fpm.pid")
 
-	// Exits on USR2 after writing a SUCCESSOR's pid to the pid file, which is
-	// what a daemonized reload looks like from outside.
-	successorProc := startSignalTarget(t, "trap ':' USR2", t.TempDir())
-	if err := os.WriteFile(pidFile,
-		[]byte(strconv.Itoa(successorProc.Process.Pid)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	successorProc := startSignalTarget(t, "ignore", t.TempDir())
+	dying := startSignalTarget(t, "exit", t.TempDir())
 
-	dying := startSignalTarget(t, "trap 'exit 0' USR2", t.TempDir())
+	// The pid file names the successor only AFTER the old master has gone, which
+	// is the order a daemonized reload actually produces. Writing it up front
+	// would let the watcher find the replacement without a reload having
+	// happened at all — the test would then pass against a lookup that never
+	// worked.
 	done := make(chan struct{})
-	go func() { _, _ = dying.Process.Wait(); close(done) }()
+	go func() {
+		_, _ = dying.Process.Wait()
+		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(successorProc.Process.Pid)+"\n"), 0o600)
+		close(done)
+	}()
+
+	if _, err := os.Stat(pidFile); err == nil {
+		t.Fatal("the pid file exists before the reload; the test would not prove anything")
+	}
 
 	pid, err := ReloadAndWait(context.Background(),
 		ReloadTarget{PID: dying.Process.Pid, PIDFile: pidFile}, 2*time.Second, nil)
@@ -348,7 +443,7 @@ func TestReloadAndWaitAcceptsAMasterThatCameBackWithANewPID(t *testing.T) {
 func TestReloadAndWaitStillReportsAMasterWithNoSuccessor(t *testing.T) {
 	dir := t.TempDir()
 
-	dying := startSignalTarget(t, "trap 'exit 1' USR2", t.TempDir())
+	dying := startSignalTarget(t, "exit", t.TempDir())
 	done := make(chan struct{})
 	go func() { _, _ = dying.Process.Wait(); close(done) }()
 
@@ -373,16 +468,20 @@ func TestReloadAndWaitStillReportsAMasterWithNoSuccessor(t *testing.T) {
 //
 // The config path is in the process title, so checking it costs nothing.
 func TestReloadMasterRefusesTheWrongMaster(t *testing.T) {
-	// A master serving /etc/php-fpm.conf, which is not the one we mean.
-	other := startSignalTarget(t, "trap ':' USR2", t.TempDir())
+	other := startNamedMaster(t, "ignore", t.TempDir(), "", "")
 
-	err := ReloadMaster(other.Process.Pid, "/etc/php/8.3/fpm/php-fpm.conf")
-	if !errors.Is(err, ErrNotAMaster) {
+	if err := ReloadMaster(other.cmd.Process.Pid, "/etc/php/8.3/fpm/php-fpm.conf"); !errors.Is(err, ErrNotAMaster) {
 		t.Errorf("a different master was reloaded as though it were ours (err = %v)", err)
 	}
 
+	// A substring match would accept this: the real path is a prefix of it.
+	if err := ReloadMaster(other.cmd.Process.Pid, other.configPath+".old"); !errors.Is(err, ErrNotAMaster) {
+		t.Errorf("%q was accepted for the master serving %q; the comparison is a "+
+			"substring rather than a path (err = %v)", other.configPath+".old", other.configPath, err)
+	}
+
 	// And the one that does match is still accepted.
-	if err := ReloadMaster(other.Process.Pid, "/etc/php-fpm.conf"); err != nil {
+	if err := ReloadMaster(other.cmd.Process.Pid, other.configPath); err != nil {
 		t.Errorf("the master serving the named configuration was refused: %v", err)
 	}
 }

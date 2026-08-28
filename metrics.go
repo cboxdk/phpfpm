@@ -157,10 +157,16 @@ func Scrape(ctx context.Context, target Target, log *slog.Logger) PoolOutcome {
 		return outcome
 	}
 
-	dialCtx, cancel := context.WithTimeout(ctx, target.dialTimeout())
+	// The timeout bounds the whole exchange, not just the dial. It used to cover
+	// the connect and then hand the parent context — often context.Background()
+	// — to the request, so a server that accepted the socket and never sent
+	// END_REQUEST hung the scrape indefinitely. A pool being scraped is a pool
+	// that is unwell often enough for that to matter.
+	ctx, cancel := context.WithTimeout(ctx, target.dialTimeout())
+	defer cancel()
+
 	log.Debug("Dialing FastCGI", "scheme", scheme, "address", address, "status_path", path)
-	client, err := fcgx.DialContext(dialCtx, scheme, address)
-	cancel()
+	client, err := fcgx.DialContext(ctx, scheme, address)
 	if err != nil {
 		outcome.Err = fmt.Errorf("failed to dial FastCGI: %w", err)
 		return outcome

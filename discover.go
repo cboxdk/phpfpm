@@ -175,7 +175,12 @@ func Discover(log *slog.Logger) ([]Discovered, error) {
 			maxChildren, _ := strconv.Atoi(strings.TrimSpace(poolConfig["pm.max_children"]))
 			processManager := strings.TrimSpace(poolConfig["pm"])
 
-			statusSocket := parseSocket(poolConfig["status_listen"], log)
+			// "pm.status_listen", with the prefix `php-fpm -tt` actually emits.
+			// Looking up the bare name always missed, so a pool exposing its
+			// status on a dedicated socket was silently scraped on its request
+			// socket instead — where the status path is not served, so the pool
+			// read as down.
+			statusSocket := parseSocket(poolConfig["pm.status_listen"], log)
 			if statusSocket == "" {
 				statusSocket = socket
 			}

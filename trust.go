@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -25,6 +26,17 @@ import (
 var ErrPathMissing = errors.New("path does not exist")
 
 func trustedPath(path string) error {
+	// Relative paths are refused outright. A caller passing "php-fpm" would have
+	// it resolved through PATH by exec, which is the attacker's variable, not
+	// ours — and nothing below can check a path that is not yet decided.
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%s is not an absolute path", path)
+	}
+
+	if err := trustedAncestors(path); err != nil {
+		return err
+	}
+
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -67,4 +79,46 @@ func trustedPath(path string) error {
 	}
 
 	return nil
+}
+
+// trustedAncestors checks the directories a path passes through.
+//
+// A file's own ownership is not enough. A root-owned, root-only-writable binary
+// sitting in a directory anyone can write to can be renamed away and replaced
+// between the check and the exec — the classic swap, and this package hands
+// what it checks straight to exec.CommandContext. So every directory from the
+// root down has to be owned by root or by us, and writable by nobody else.
+//
+// A world-writable directory with the sticky bit set (/tmp) is accepted, because
+// the sticky bit is exactly the mitigation for this attack: with +t only the
+// owner of an entry may rename or remove it, so the swap the check exists to
+// prevent cannot happen. Refusing it would be refusing a defence rather than a
+// hole.
+func trustedAncestors(path string) error {
+	dir := filepath.Dir(filepath.Clean(path))
+
+	for {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return fmt.Errorf("cannot stat %s: %w", dir, err)
+		}
+
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("cannot determine ownership of %s", dir)
+		}
+		if uid := os.Getuid(); stat.Uid != 0 && uint64(stat.Uid) != uint64(uid) {
+			return fmt.Errorf("%s is inside %s, which is owned by uid %d", path, dir, stat.Uid)
+		}
+		if perm := info.Mode().Perm(); perm&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
+			return fmt.Errorf("%s is inside %s, which is writable by others (%#o) without the sticky bit",
+				path, dir, perm)
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
 }

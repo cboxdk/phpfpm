@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,6 +29,12 @@ import (
 func Validate(ctx context.Context, binary, configPath string) error {
 	if binary == "" {
 		return errors.New("no php-fpm binary given")
+	}
+	// A relative name is resolved through PATH by exec, and PATH is the
+	// attacker's variable when this runs as root. Callers get the absolute path
+	// from discovery, which has already checked it.
+	if !filepath.IsAbs(binary) {
+		return fmt.Errorf("php-fpm binary must be an absolute path, got %q", binary)
 	}
 
 	args := []string{"-t"}
@@ -153,7 +160,14 @@ func ReloadAndWait(ctx context.Context, target ReloadTarget, settle time.Duratio
 				log.Info("The master came back under a new pid, as a daemonized reload does",
 					"was", target.PID, "now", pid)
 
-				return pid, nil
+				// Watched for the REST of the settle window rather than accepted
+				// on sight. A master that fails late initialisation exists for a
+				// moment and then exits, so returning at the first glimpse of a
+				// successor reported success over pools that were about to go
+				// down — the exact failure the settle window exists to catch,
+				// skipped by the path added to fix a different one.
+				target.PID = pid
+				continue
 			}
 			if time.Now().After(deadline) {
 				return 0, fmt.Errorf("php-fpm master %d exited during reload and no master took its place",
@@ -172,8 +186,15 @@ func ReloadAndWait(ctx context.Context, target ReloadTarget, settle time.Duratio
 // successor looks for the master that replaced one that has gone.
 func successor(target ReloadTarget, log *slog.Logger) (int, bool) {
 	if target.PIDFile != "" {
+		// Checked against OUR config, not merely against "a php-fpm master". A
+		// pid file can be stale, or hold a number the kernel has since given to
+		// the OTHER master on a host running two — and accepting that as our
+		// successor would report a reload as survived while our own master lay
+		// dead and nothing rolled anything back.
 		if pid, err := MasterPID(target.PIDFile); err == nil && pid != target.PID {
-			return pid, true
+			if verifyMaster(pid, target.ConfigPath) == nil {
+				return pid, true
+			}
 		}
 	}
 
@@ -249,20 +270,28 @@ func verifyMaster(pid int, configPath string) error {
 		return fmt.Errorf("%w: no process %d: %w", ErrNotAMaster, pid, err)
 	}
 
-	cmdline, err := proc.Cmdline()
-	if err != nil {
-		return fmt.Errorf("%w: cannot read the command line of pid %d: %w", ErrNotAMaster, pid, err)
+	// Discovery-grade identity, not a substring search on the command line.
+	// Anyone can title a shell `: "php-fpm: master process (/etc/php-fpm.conf)"`
+	// and a loose check accepts it — which matters because a spoofed master is
+	// accepted as a SUCCESSOR: a local user could make a failed reload look
+	// survived, so nothing rolls back and the real pools stay down. This
+	// requires the process name to match php-fpm's, and its executable to pass
+	// the same ownership checks discovery applies before running one.
+	_, found, ok := masterIdentity(proc, logOrDiscard(nil))
+	if !ok {
+		return fmt.Errorf("%w: pid %d does not look like a php-fpm master this process trusts", ErrNotAMaster, pid)
 	}
 
-	// The same signature Discover matches on: php-fpm sets its process title to
-	// "php-fpm: master process (/path/to/php-fpm.conf)".
-	if !strings.Contains(cmdline, "master process") || !strings.Contains(cmdline, "php-fpm") {
-		return fmt.Errorf("%w: pid %d is %q", ErrNotAMaster, pid, cmdline)
+	if configPath == "" {
+		return nil
 	}
 
-	if configPath != "" && !strings.Contains(cmdline, configPath) {
-		return fmt.Errorf("%w: pid %d is a php-fpm master, but for %q rather than %q",
-			ErrNotAMaster, pid, cmdline, configPath)
+	// Compared as a path, not as a substring: /etc/php-fpm.conf.old contains
+	// /etc/php-fpm.conf, and on a host running several masters that is the
+	// difference between reloading ours and reloading someone else's.
+	if filepath.Clean(found) != filepath.Clean(configPath) {
+		return fmt.Errorf("%w: pid %d is the master for %q, not %q",
+			ErrNotAMaster, pid, found, configPath)
 	}
 
 	return nil

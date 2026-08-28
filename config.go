@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -12,6 +13,10 @@ import (
 var (
 	fpmConfigCache     = make(map[string]*EffectiveConfig)
 	fpmConfigCacheLock sync.Mutex
+
+	// fpmConfigEpoch moves on every invalidation, so a parse that began before
+	// one can tell that its result is already out of date.
+	fpmConfigEpoch uint64
 )
 
 // InvalidateConfigCache forgets the parsed configuration.
@@ -29,11 +34,13 @@ func InvalidateConfigCache(binary, configPath string) {
 
 	if binary == "" && configPath == "" {
 		clear(fpmConfigCache)
+		fpmConfigEpoch++
 
 		return
 	}
 
 	delete(fpmConfigCache, binary+"::"+configPath)
+	fpmConfigEpoch++
 }
 
 type EffectiveConfig struct {
@@ -49,10 +56,24 @@ type EffectiveConfig struct {
 // — but it means a caller that CHANGES the configuration has to say so. See
 // InvalidateConfigCache.
 func ParseConfig(FPMBinaryPath string, FPMConfigPath string) (*EffectiveConfig, error) {
+	// Same reason as Validate: a relative name goes through PATH, and this forks
+	// the result. Discovery supplies an absolute path it has already checked.
+	if !filepath.IsAbs(FPMBinaryPath) {
+		return nil, fmt.Errorf("php-fpm binary must be an absolute path, got %q", FPMBinaryPath)
+	}
+
 	key := FPMBinaryPath + "::" + FPMConfigPath
 
 	fpmConfigCacheLock.Lock()
 	cached, ok := fpmConfigCache[key]
+	// The epoch this parse is about to be based on. An invalidation while
+	// php-fpm is forked below moves it, and the result is then dropped rather
+	// than stored: without this a scrape that began before a change could finish
+	// after it and repopulate the cache with pre-change data, which no
+	// subsequent invalidation would clear because nobody knew it was stale. The
+	// pool then reads as configured for what it used to be, so the change is
+	// proposed again on every round.
+	epoch := fpmConfigEpoch
 	fpmConfigCacheLock.Unlock()
 
 	if ok {
@@ -71,7 +92,9 @@ func ParseConfig(FPMBinaryPath string, FPMConfigPath string) (*EffectiveConfig, 
 	}
 
 	fpmConfigCacheLock.Lock()
-	fpmConfigCache[key] = fpmconfig
+	if fpmConfigEpoch == epoch {
+		fpmConfigCache[key] = fpmconfig
+	}
 	fpmConfigCacheLock.Unlock()
 
 	return fpmconfig, nil
