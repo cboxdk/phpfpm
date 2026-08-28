@@ -112,6 +112,14 @@ func trustedAncestors(path string) error {
 	for {
 		info, err := os.Lstat(dir)
 		if err != nil {
+			if os.IsNotExist(err) {
+				// The same leftover as a missing file, and far commoner: a
+				// master whose whole directory tree has been removed. Reported
+				// as such so the caller can log it quietly instead of opening
+				// every run with warnings about processes nobody is managing.
+				return fmt.Errorf("%w: %s", ErrPathMissing, dir)
+			}
+
 			return fmt.Errorf("cannot stat %s: %w", dir, err)
 		}
 
