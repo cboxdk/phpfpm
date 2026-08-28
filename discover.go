@@ -1,11 +1,9 @@
 package phpfpm
 
 import (
-	"bytes"
 	"fmt"
 	"log/slog"
 	"net"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -22,7 +20,14 @@ type Discovered struct {
 	Binary       string
 	Socket       string
 	StatusSocket string
-	CliBinary    string
+
+	// PID is the master process serving this pool.
+	//
+	// Carried from the process scan because the pid file is not a reliable
+	// alternative: the official php:8.3-fpm image ships `pid` commented out, so
+	// there is no file to read — and a caller that could not identify the master
+	// would write pool configuration and never reload it.
+	PID int
 }
 
 var fpmNamePattern = regexp.MustCompile(`^php[0-9]{0,2}.*fpm.*$`)
@@ -106,8 +111,6 @@ func Discover(log *slog.Logger) ([]Discovered, error) {
 				continue
 			}
 
-			cliBinary, _ := findMatchingCliBinary(exe)
-
 			found = append(found, Discovered{
 				Name:         poolName,
 				ConfigPath:   config,
@@ -115,7 +118,7 @@ func Discover(log *slog.Logger) ([]Discovered, error) {
 				Binary:       exe,
 				Socket:       socket,
 				StatusSocket: statusSocket,
-				CliBinary:    cliBinary,
+				PID:          int(p.Pid),
 			})
 
 			log.Debug("Discovered php-fpm pool",
@@ -124,7 +127,6 @@ func Discover(log *slog.Logger) ([]Discovered, error) {
 				"socket", socket,
 				"status_socket", statusSocket,
 				"status_path", status,
-				"cli_binary", cliBinary,
 			)
 		}
 	}
@@ -173,36 +175,4 @@ func extractConfigFromMaster(cmdline string) string {
 		return cmdline[start+1 : end]
 	}
 	return ""
-}
-
-// findMatchingCliBinary attempts to find the php-cli binary that matches the version of the FPM binary.
-func findMatchingCliBinary(fpmBinary string) (string, error) {
-	out, err := exec.Command(fpmBinary, "-v").Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get version from fpm binary: %w", err)
-	}
-	re := regexp.MustCompile(`PHP (\d+\.\d+)`)
-	matches := re.FindSubmatch(out)
-	if len(matches) < 2 {
-		return "", fmt.Errorf("could not parse PHP version from output: %s", string(out))
-	}
-	version := string(matches[1]) // e.g. "8.2"
-
-	candidates := []string{
-		filepath.Join("/usr/bin", "php"+version),
-		filepath.Join("/usr/local/bin", "php"+version),
-		"php" + version, // Fallback til PATH
-		"php",           // Sidste fallback
-	}
-
-	for _, cli := range candidates {
-		out, err := exec.Command(cli, "-v").Output()
-		if err != nil {
-			continue
-		}
-		if bytes.Contains(out, []byte(version)) && bytes.Contains(out, []byte("cli")) {
-			return cli, nil
-		}
-	}
-	return "", fmt.Errorf("matching php-cli binary for version %s not found", version)
 }

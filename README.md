@@ -13,10 +13,10 @@ depends on the other; both depend on this.
 | Area | Entry point |
 |---|---|
 | Parse the effective configuration | `ParseConfig` — runs `php-fpm -tt` and returns global settings plus one map per pool |
-| Find running masters | `Discover` — locates php-fpm processes and the pools they serve |
-| Scrape live status | `Status` — per-pool counters and per-worker RSS over FastCGI |
-| Read opcache state | `Opcache` |
-| Validate and reload | `Validate` (`php-fpm -t`), `Reload` (SIGUSR2) |
+| Find running masters | `Discover` — locates php-fpm processes, their pools, and the master PID |
+| Scrape live status | `Scrape` (one pool) and `ScrapeAll` (many, concurrently) — per-pool counters and per-worker RSS |
+| Read opcache state | `GetOpcacheStatus` |
+| Validate and reload | `Validate` (`php-fpm -t`), `Reload` (SIGUSR2), `ReloadAndWait`, `MasterPID` |
 
 ## Design notes
 
@@ -25,13 +25,19 @@ depends on the other; both depend on this.
 different destinations, and it makes tests order-dependent.
 
 **Reload, never restart.** `Reload` sends SIGUSR2, which makes the master re-read
-its configuration and cycle workers gracefully. Callers that change `pm.*` should
-always pair it with `Validate` first: an invalid drop-in that reaches a reload
-takes the pool down.
+its configuration and cycle workers gracefully. Callers that change `pm.*` must
+pair it with `Validate` first: an invalid drop-in that reaches a reload does not
+degrade — the master refuses to come back, and every pool it served goes with it.
+Verified against a real master: a drop-in naming a pool that no longer exists
+makes `php-fpm -t` exit 78, and reloading with that file present kills the master
+permanently.
 
-**Caching is opt-in.** `ParseConfig` is expensive (it forks `php-fpm`). The
-caching wrapper is a separate type so a long-running caller gets reuse while a
-one-shot caller gets fresh output.
+**The configuration cache never expires on its own.** `ParseConfig` forks
+`php-fpm`, so its result is cached per binary+config pair for the life of the
+process. That is right for a scrape loop and wrong for anything that CHANGES the
+configuration: such a caller must call `InvalidateConfigCache` after reloading,
+or it will keep reading the settings it saw at startup. A consumer that missed
+this reported a pool as configured for 4 workers hours after setting it to 12.
 
 ## Status
 

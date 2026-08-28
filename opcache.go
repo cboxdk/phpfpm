@@ -54,7 +54,7 @@ echo json_encode(opcache_get_status());
 exit;`
 
 var (
-	opcacheScriptOnce sync.Once
+	opcacheScriptMu   sync.Mutex
 	opcacheScriptPath string
 	opcacheScriptErr  error
 )
@@ -66,7 +66,25 @@ var (
 // world-readable: PHP-FPM usually runs as a different user than the exporter, and
 // the contents are fixed and non-secret.
 func opcacheScript() (string, error) {
-	opcacheScriptOnce.Do(func() {
+	opcacheScriptMu.Lock()
+	defer opcacheScriptMu.Unlock()
+
+	// Recreated when it is missing rather than written exactly once.
+	//
+	// With a sync.Once, RemoveOpcacheScript was terminal: a shutdown handler
+	// calling it -- documented as safe at any time -- left every later probe
+	// handing PHP-FPM a path that no longer existed, failing silently for the
+	// life of the process. The same Once also left the path readable without
+	// synchronisation while a concurrent ScrapeAll was writing it.
+	if opcacheScriptPath != "" {
+		if _, err := os.Stat(opcacheScriptPath); err == nil {
+			return opcacheScriptPath, nil
+		}
+	}
+
+	opcacheScriptErr = nil
+
+	func() {
 		f, err := os.CreateTemp("", opcacheScriptPrefix+"*.php")
 		if err != nil {
 			opcacheScriptErr = fmt.Errorf("failed to create PHP script: %w", err)
@@ -91,16 +109,21 @@ func opcacheScript() (string, error) {
 		}
 
 		opcacheScriptPath = f.Name()
-	})
+	}()
 
 	return opcacheScriptPath, opcacheScriptErr
 }
 
 // RemoveOpcacheScript deletes the generated status script. Safe to call when no
-// script was ever written.
+// script was ever written, and safe to call while scrapes are in flight — the
+// next probe recreates it.
 func RemoveOpcacheScript() {
+	opcacheScriptMu.Lock()
+	defer opcacheScriptMu.Unlock()
+
 	if opcacheScriptPath != "" {
 		_ = os.Remove(opcacheScriptPath)
+		opcacheScriptPath = ""
 	}
 }
 

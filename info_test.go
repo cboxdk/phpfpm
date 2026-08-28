@@ -9,52 +9,6 @@ import (
 	"time"
 )
 
-func TestInfo_Structure(t *testing.T) {
-	// Test Info structure
-	info := Info{
-		Version:    "PHP 8.2.10 (cli) (built: Sep  1 2023 10:30:45)",
-		Extensions: []string{"Core", "date", "filter", "hash", "json", "pcre", "Reflection", "SPL"},
-		Opcache:    nil,
-	}
-
-	// Verify structure
-	if info.Version != "PHP 8.2.10 (cli) (built: Sep  1 2023 10:30:45)" {
-		t.Errorf("Expected Version to be set correctly")
-	}
-
-	if len(info.Extensions) != 8 {
-		t.Errorf("Expected 8 extensions, got %d", len(info.Extensions))
-	}
-
-	if info.Extensions[0] != "Core" {
-		t.Errorf("Expected first extension to be 'Core', got '%s'", info.Extensions[0])
-	}
-
-	if info.Opcache != nil {
-		t.Errorf("Expected Opcache to be nil")
-	}
-
-	// Test with Opcache
-	opcacheStatus := &OpcacheStatus{
-		Enabled: true,
-		MemoryUsage: Memory{
-			UsedMemory:       1024000,
-			FreeMemory:       512000,
-			WastedMemory:     1000,
-			CurrentWastedPct: 0.1,
-		},
-	}
-
-	info.Opcache = opcacheStatus
-	if info.Opcache == nil {
-		t.Errorf("Expected Opcache to be set")
-	}
-
-	if !info.Opcache.Enabled {
-		t.Errorf("Expected Opcache to be enabled")
-	}
-}
-
 func TestGetPHPStats_MockBinary(t *testing.T) {
 
 	// Create mock PHP binary
@@ -478,7 +432,7 @@ sleep 0.1
 }
 
 // A host running php8.1-fpm and php8.3-fpm side by side is exactly what
-// findMatchingCliBinary exists to support. A single unkeyed cache meant
+// side by side. A single unkeyed cache meant
 // whichever pool was scraped first decided the version every other pool
 // reported for the next hour.
 func TestGetPHPStats_CacheIsKeyedByBinary(t *testing.T) {

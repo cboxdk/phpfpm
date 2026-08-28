@@ -32,9 +32,8 @@ type phpInfoCall struct {
 }
 
 // Keyed by binary path. A single unkeyed global meant that on a host running
-// php8.1-fpm and php8.3-fpm side by side -- exactly what findMatchingCliBinary
-// exists to support -- whichever pool was scraped first decided the version
-// every other pool reported for the next hour.
+// php8.1-fpm and php8.3-fpm side by side, whichever pool was scraped first
+// decided the version every other pool reported for the next hour.
 var (
 	phpInfoMu       sync.Mutex
 	phpInfoCache    = map[string]phpInfoEntry{}
@@ -44,7 +43,6 @@ var (
 type Info struct {
 	Version    string
 	Extensions []string
-	Opcache    *OpcacheStatus
 }
 
 // resetPHPInfoCache clears the cache. Used by tests, which would otherwise

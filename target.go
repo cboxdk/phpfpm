@@ -26,15 +26,17 @@ type Target struct {
 
 	// StatusSocket is where the status page is served, when it differs from
 	// Socket. Empty means Socket.
-	StatusSocket      string `mapstructure:"status_socket"`
-	StatusPath        string `mapstructure:"status_path"`
-	StatusPathEnabled bool   `mapstructure:"status_path_enabled"`
+	StatusSocket string `mapstructure:"status_socket"`
+	StatusPath   string `mapstructure:"status_path"`
 
 	// ConfigPath and Binary let ParseConfig recover the effective configuration
 	// for this pool. Both come from the master's command line during Discover.
 	ConfigPath string `mapstructure:"config_path"`
 	Binary     string `mapstructure:"binary"`
-	CliBinary  string `mapstructure:"cli_binary"`
+
+	// PID is the master serving this pool, when it is known. Zero means unknown,
+	// not "no master".
+	PID int `mapstructure:"-"`
 
 	// Timeout bounds the FastCGI dial for this pool. Zero means DefaultTimeout.
 	Timeout time.Duration `mapstructure:"timeout"`
@@ -84,7 +86,7 @@ func TargetFromDiscovered(d Discovered) Target {
 		StatusPath:   d.StatusPath,
 		ConfigPath:   d.ConfigPath,
 		Binary:       d.Binary,
-		CliBinary:    d.CliBinary,
+		PID:          d.PID,
 	}
 }
 
