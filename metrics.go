@@ -32,7 +32,14 @@ type PoolProcess struct {
 	Script            string  `json:"script"`
 	LastRequestCPU    float64 `json:"last request cpu"`
 	LastRequestMemory float64 `json:"last request memory"`
-	CurrentRSS        int64   `json:"current_rss"`
+	// CurrentRSS is the worker's resident memory, in bytes.
+	//
+	// Not part of PHP-FPM's status output — it is filled in from the operating
+	// system using PID, because the size of a worker is the number any capacity
+	// decision turns on and the status page does not carry it. Zero means the
+	// worker could not be read, usually because it exited between the status
+	// response and the lookup.
+	CurrentRSS int64 `json:"current_rss"`
 }
 
 type Pool struct {
@@ -192,6 +199,10 @@ func Scrape(ctx context.Context, target Target, log *slog.Logger) PoolOutcome {
 		}
 		result.Global = exportableConfig(conf.Global)
 	}
+
+	// PHP-FPM does not report worker memory; it has to be read from the OS using
+	// the pids the status page provides. See rss.go.
+	enrichWorkerRSS(&pool, log)
 
 	recountProcesses(&pool, target.StatusPath)
 
