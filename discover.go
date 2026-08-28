@@ -33,6 +33,97 @@ type Discovered struct {
 
 var fpmNamePattern = regexp.MustCompile(`^php[0-9]{0,2}.*fpm.*$`)
 
+// Master is a running php-fpm master, identified WITHOUT reading its
+// configuration.
+//
+// Discover parses each master's effective config, which is what makes it
+// useful — and what makes it useless in the one situation a caller most needs
+// an answer. A master whose config file no longer parses is skipped entirely,
+// so a tool trying to repair exactly that config cannot find the master to
+// repair it for. Observed: a rejected pool fragment left on disk by a run that
+// died, a healthy master still serving from the configuration it loaded before
+// the file appeared, and `fpm-tune apply` reporting "no PHP-FPM pools found"
+// while the fragment sat there waiting for any reload to adopt it.
+//
+// This carries only what the process table itself provides, so it answers even
+// when the configuration does not.
+type Master struct {
+	PID        int
+	Binary     string
+	ConfigPath string
+}
+
+// DiscoverMasters scans the process table for php-fpm masters.
+//
+// The binary and config path still go through the trust checks — they are about
+// to be handed to exec — but nothing is executed here and nothing is parsed.
+//
+// log may be nil.
+func DiscoverMasters(log *slog.Logger) ([]Master, error) {
+	log = logOrDiscard(log)
+
+	procs, err := process.Processes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list processes: %w", err)
+	}
+
+	var masters []Master
+	for _, p := range procs {
+		exe, config, ok := masterIdentity(p, log)
+		if !ok {
+			continue
+		}
+		masters = append(masters, Master{PID: int(p.Pid), Binary: exe, ConfigPath: config})
+	}
+
+	return masters, nil
+}
+
+// masterIdentity is the part of discovery that reads nothing but the process
+// table, shared so the two entry points cannot drift apart on what counts as a
+// master or on which paths are trusted.
+func masterIdentity(p *process.Process, log *slog.Logger) (binary, config string, ok bool) {
+	name, err := p.Name()
+	if err != nil || !fpmNamePattern.MatchString(filepath.Base(name)) {
+		return "", "", false
+	}
+
+	cmdlineStr, err := p.Cmdline()
+	if err != nil || !strings.Contains(cmdlineStr, "master process") {
+		return "", "", false
+	}
+
+	config = extractConfigFromMaster(cmdlineStr)
+	if config == "" {
+		return "", "", false
+	}
+
+	exe, err := p.Exe()
+	if err != nil {
+		log.Debug("Cannot determine binary path", "pid", p.Pid, "error", err)
+
+		return "", "", false
+	}
+
+	// The process table is not a trust boundary: any local user can start a
+	// process whose name matches and whose command line names a config path
+	// they control. Both are about to be handed to exec.
+	if err := trustedPath(exe); err != nil {
+		logSkip(log, err, "Refusing to run discovered PHP-FPM binary",
+			"pid", p.Pid, "binary", exe, "reason", err)
+
+		return "", "", false
+	}
+	if err := trustedPath(config); err != nil {
+		logSkip(log, err, "Refusing to read discovered PHP-FPM config",
+			"pid", p.Pid, "config", config, "reason", err)
+
+		return "", "", false
+	}
+
+	return exe, config, true
+}
+
 // Discover scans the process table for PHP-FPM masters and returns the pools
 // they serve.
 //
@@ -51,38 +142,8 @@ func Discover(log *slog.Logger) ([]Discovered, error) {
 	found := make([]Discovered, 0)
 
 	for _, p := range procs {
-		name, err := p.Name()
-		if err != nil || !fpmNamePattern.MatchString(filepath.Base(name)) {
-			continue
-		}
-
-		cmdlineStr, err := p.Cmdline()
-		if err != nil || !strings.Contains(cmdlineStr, "master process") {
-			continue
-		}
-
-		config := extractConfigFromMaster(cmdlineStr)
-		if config == "" {
-			continue
-		}
-
-		exe, err := p.Exe()
-		if err != nil {
-			log.Debug("Cannot determine binary path", "pid", p.Pid, "error", err)
-			continue
-		}
-
-		// The process table is not a trust boundary: any local user can start a
-		// process whose name matches and whose command line names a config path
-		// they control. Both are about to be handed to exec.
-		if err := trustedPath(exe); err != nil {
-			logSkip(log, err, "Refusing to run discovered PHP-FPM binary",
-				"pid", p.Pid, "binary", exe, "reason", err)
-			continue
-		}
-		if err := trustedPath(config); err != nil {
-			logSkip(log, err, "Refusing to read discovered PHP-FPM config",
-				"pid", p.Pid, "config", config, "reason", err)
+		exe, config, ok := masterIdentity(p, log)
+		if !ok {
 			continue
 		}
 

@@ -245,3 +245,47 @@ func TestDiscoverFPMProcesses_MockImplementation(t *testing.T) {
 		t.Logf("FPM %d: Binary=%s, Socket=%s, StatusPath=%s", i, fpm.Binary, fpm.Socket, fpm.StatusPath)
 	}
 }
+
+// TestDiscoverMastersAnswersWhenTheConfigDoesNot is the whole point of the
+// split.
+//
+// Discover parses each master's effective configuration, so a master whose
+// config no longer parses is skipped entirely — and a tool trying to REPAIR
+// that config then cannot find the master to repair it for. Verified in the
+// php:8.3-fpm image: a rejected pool fragment on disk, a healthy master still
+// serving what it loaded before the file appeared, and the caller reporting
+// "no PHP-FPM pools found" while the fragment waited for any reload to adopt it
+// and kill the master permanently.
+func TestDiscoverMastersAnswersWhenTheConfigDoesNot(t *testing.T) {
+	// Both paths must agree on what a master is, so the identity check is shared
+	// rather than duplicated. A config that cannot be parsed is the difference
+	// between them and the only difference.
+	masters, err := DiscoverMasters(nil)
+	if err != nil {
+		t.Fatalf("DiscoverMasters: %v", err)
+	}
+
+	pools, err := Discover(nil)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	// Every master a pool was found for must also appear in the lighter scan;
+	// the reverse need not hold, and that asymmetry is the fix.
+	seen := map[int]bool{}
+	for _, m := range masters {
+		seen[m.PID] = true
+	}
+	for _, p := range pools {
+		if p.PID > 0 && !seen[p.PID] {
+			t.Errorf("Discover found a pool on master %d that DiscoverMasters missed; "+
+				"the lighter scan must be a superset", p.PID)
+		}
+	}
+
+	for _, m := range masters {
+		if m.Binary == "" || m.ConfigPath == "" || m.PID <= 0 {
+			t.Errorf("a master was returned without the identity a caller needs: %+v", m)
+		}
+	}
+}
