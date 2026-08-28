@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 // Validate checks a configuration with `php-fpm -t` without applying it.
@@ -54,10 +56,8 @@ func Validate(ctx context.Context, binary, configPath string) error {
 // Callers changing pool settings should Validate first. Reload does not check
 // the configuration it is asking the master to adopt.
 func Reload(pid int) error {
-	if pid <= 1 {
-		// PID 1 is the container's init, not a php-fpm master that was
-		// discovered. Signalling it would be a different and much worse event.
-		return fmt.Errorf("refusing to signal pid %d", pid)
+	if err := VerifyMaster(pid); err != nil {
+		return err
 	}
 
 	proc, err := os.FindProcess(pid)
@@ -111,6 +111,52 @@ func ReloadAndWait(ctx context.Context, pid int, settle time.Duration, log *slog
 	}
 }
 
+// ErrNotAMaster reports that a pid is not a php-fpm master process.
+var ErrNotAMaster = errors.New("not a php-fpm master process")
+
+// VerifyMaster confirms that a pid really is a php-fpm master, immediately
+// before it is signalled.
+//
+// This replaced a `pid <= 1` refusal that was wrong in both directions.
+//
+// It refused the most common deployment there is. In the official php:8.3-fpm
+// image the master IS pid 1, so `fpm-tune apply` wrote the configuration,
+// declined to reload, reported the master as dead and rolled the whole change
+// back — verified against that image, where every apply failed this way.
+//
+// And it did not guard against the thing that actually matters. A pid is only
+// a promise about the instant it was read: between discovery and the reload the
+// master can exit and the kernel can hand the number to something else. SIGUSR2
+// to a process that did not ask for it terminates it by default, so the old
+// check would happily kill an unrelated program while carefully declining to
+// signal init. Container pid namespaces start at 1 and stay small, which is
+// exactly where recycling is likely.
+//
+// Checking what the process IS covers both, and costs one /proc read.
+func VerifyMaster(pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("%w: pid %d", ErrNotAMaster, pid)
+	}
+
+	proc, err := process.NewProcess(int32(pid))
+	if err != nil {
+		return fmt.Errorf("%w: no process %d: %w", ErrNotAMaster, pid, err)
+	}
+
+	cmdline, err := proc.Cmdline()
+	if err != nil {
+		return fmt.Errorf("%w: cannot read the command line of pid %d: %w", ErrNotAMaster, pid, err)
+	}
+
+	// The same signature Discover matches on: php-fpm sets its process title to
+	// "php-fpm: master process (/path/to/php-fpm.conf)".
+	if !strings.Contains(cmdline, "master process") || !strings.Contains(cmdline, "php-fpm") {
+		return fmt.Errorf("%w: pid %d is %q", ErrNotAMaster, pid, cmdline)
+	}
+
+	return nil
+}
+
 // processAlive reports whether a pid is still running, without disturbing it.
 func processAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
@@ -137,11 +183,10 @@ func MasterPID(pidFile string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("pid file %s does not contain a pid: %w", pidFile, err)
 	}
-	if pid <= 1 {
-		return 0, fmt.Errorf("pid file %s contains implausible pid %d", pidFile, pid)
-	}
-	if !processAlive(pid) {
-		return 0, fmt.Errorf("pid file %s names pid %d, which is not running", pidFile, pid)
+	if err := VerifyMaster(pid); err != nil {
+		// A stale pid file is ordinary — the master was killed, the file stayed —
+		// and the number in it may since have been reused by something else.
+		return 0, fmt.Errorf("pid file %s names pid %d: %w", pidFile, pid, err)
 	}
 
 	return pid, nil

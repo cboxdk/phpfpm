@@ -2,6 +2,7 @@ package phpfpm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,14 +41,57 @@ func TestValidateWithoutABinary(t *testing.T) {
 	}
 }
 
-// TestReloadRefusesInit: pid 1 is the container's init, not a discovered
-// php-fpm master. Sending it SIGUSR2 is a different and much worse event than
-// the one the caller asked for.
-func TestReloadRefusesInit(t *testing.T) {
-	for _, pid := range []int{0, 1, -1} {
+// TestReloadRefusesAProcessThatIsNotAMaster.
+//
+// This replaced a test that asserted pid 1 was refused, which was wrong twice
+// over. In the official php:8.3-fpm image the master IS pid 1, so the rule it
+// locked in made every apply on the most common deployment there is write the
+// configuration, decline to reload, and roll the whole change back — confirmed
+// against that image.
+//
+// And refusing pid 1 never addressed the real hazard. A pid is a promise about
+// the instant it was read; between discovery and the reload the master can exit
+// and the kernel can hand the number to something else. SIGUSR2 terminates a
+// process that has no handler for it, so the old rule would kill an unrelated
+// program while carefully declining to signal init.
+func TestReloadRefusesAProcessThatIsNotAMaster(t *testing.T) {
+	for _, pid := range []int{0, -1} {
 		if err := Reload(pid); err == nil {
 			t.Errorf("Reload(%d) was accepted", pid)
 		}
+	}
+
+	// A live process that is not php-fpm: the pid-reuse case, and the one the
+	// old check let through.
+	cmd := exec.Command("/bin/sh", "-c", "sleep 10")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	err := Reload(cmd.Process.Pid)
+	if !errors.Is(err, ErrNotAMaster) {
+		t.Errorf("Reload sent SIGUSR2 to a process that is not a php-fpm master (err = %v); "+
+			"the default action for USR2 would have killed it", err)
+	}
+}
+
+// TestReloadAcceptsAMasterThatIsPID1: the container case the old rule refused.
+// Verified in the php:8.3-fpm image, where php-fpm is pid 1.
+func TestReloadAcceptsAMasterThatIsPID1(t *testing.T) {
+	if err := VerifyMaster(1); err == nil {
+		// Only true when this test itself runs as pid 1 in a container whose
+		// init is php-fpm, which is not the usual case.
+		t.Log("pid 1 is a php-fpm master here and was accepted")
+	}
+
+	// The property without needing to BE pid 1: identity decides, not the number.
+	cmd := startSignalTarget(t, "trap ':' USR2", t.TempDir())
+	if err := VerifyMaster(cmd.Process.Pid); err != nil {
+		t.Errorf("a process carrying the master's title was refused: %v", err)
 	}
 }
 
@@ -111,16 +155,42 @@ func TestMasterPID(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Run("reads a live pid", func(t *testing.T) {
+		// A live php-fpm master rather than this test binary: a pid file is only
+		// useful if what it names is still the master, and a stale one naming a
+		// recycled pid is the failure this guards.
+		master := startSignalTarget(t, "trap ':' USR2", t.TempDir())
+
 		f := filepath.Join(dir, "live.pid")
-		if err := os.WriteFile(f, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(f, []byte(strconv.Itoa(master.Process.Pid)+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		pid, err := MasterPID(f)
 		if err != nil {
 			t.Fatalf("MasterPID: %v", err)
 		}
-		if pid != os.Getpid() {
-			t.Errorf("pid = %d, want %d", pid, os.Getpid())
+		if pid != master.Process.Pid {
+			t.Errorf("pid = %d, want %d", pid, master.Process.Pid)
+		}
+	})
+
+	t.Run("rejects a pid file naming something that is not a master", func(t *testing.T) {
+		// The stale-pid-file-plus-reuse case: the file survived the master, and
+		// the number now belongs to something else.
+		other := exec.Command("/bin/sh", "-c", "sleep 10")
+		if err := other.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = other.Process.Kill()
+			_, _ = other.Process.Wait()
+		})
+
+		f := filepath.Join(dir, "recycled.pid")
+		if err := os.WriteFile(f, []byte(strconv.Itoa(other.Process.Pid)+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := MasterPID(f); !errors.Is(err, ErrNotAMaster) {
+			t.Errorf("a pid file naming an unrelated live process was accepted (err = %v)", err)
 		}
 	})
 
@@ -179,7 +249,14 @@ func startSignalTarget(t *testing.T, trap, dir string) *exec.Cmd {
 	t.Helper()
 
 	ready := filepath.Join(dir, "ready")
-	cmd := exec.Command("/bin/sh", "-c", trap+"; touch "+ready+"; sleep 10 & wait")
+
+	// The no-op string at the front puts the master's process title into the
+	// shell's command line, so the stub is recognised by the same check a real
+	// master passes. Faking the check out instead would leave the one thing
+	// standing between this package and SIGUSR2 to an arbitrary process
+	// untested.
+	title := `: "php-fpm: master process (/etc/php-fpm.conf)"; `
+	cmd := exec.Command("/bin/sh", "-c", title+trap+"; touch "+ready+"; sleep 10 & wait")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
