@@ -3,11 +3,15 @@ package phpfpm
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 var (
@@ -56,6 +60,32 @@ type EffectiveConfig struct {
 // — but it means a caller that CHANGES the configuration has to say so. See
 // InvalidateConfigCache.
 func ParseConfig(FPMBinaryPath string, FPMConfigPath string) (*EffectiveConfig, error) {
+	// A default rather than none. This forks php-fpm, and a fork with no bound is
+	// a scrape loop that stops forever the first time the binary wedges — on an
+	// NFS-backed include, an operator's wrapper script, a host under memory
+	// pressure. Callers that care pass their own.
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultParseTimeout)
+	defer cancel()
+
+	return ParseConfigContext(ctx, FPMBinaryPath, FPMConfigPath)
+}
+
+// DefaultParseTimeout bounds ParseConfig when the caller gives no context.
+//
+// Generous: `php-fpm -tt` on a host with many pools is not instant, and killing
+// a slow-but-working parse is worse than waiting for it. The point is that there
+// IS a bound.
+const DefaultParseTimeout = 30 * time.Second
+
+// maxParseOutput bounds what is captured from php-fpm.
+//
+// The output is a configuration dump, which is kilobytes. A process producing
+// megabytes is malfunctioning, and reading all of it into memory to report that
+// it malfunctioned helps nobody.
+const maxParseOutput = 4 << 20
+
+// ParseConfigContext is ParseConfig with a caller-supplied deadline.
+func ParseConfigContext(ctx context.Context, FPMBinaryPath string, FPMConfigPath string) (*EffectiveConfig, error) {
 	// Same reason as Validate: a relative name goes through PATH, and this forks
 	// the result. Discovery supplies an absolute path it has already checked.
 	if !filepath.IsAbs(FPMBinaryPath) {
@@ -77,14 +107,41 @@ func ParseConfig(FPMBinaryPath string, FPMConfigPath string) (*EffectiveConfig, 
 	fpmConfigCacheLock.Unlock()
 
 	if ok {
-		return cached, nil
+		// Copied, not shared. The cache hands the same pointer to every caller
+		// for the life of the process, so one caller editing a pool map — or
+		// reading it while another edits — poisons every scrape that follows, or
+		// panics on Go's map race detection.
+		return cached.clone(), nil
 	}
 
-	cmd := exec.Command(FPMBinaryPath, "-tt", "--fpm-config", FPMConfigPath)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run php-fpm -tt: %w\nOutput: %s", err, output)
+	cmd := exec.CommandContext(ctx, FPMBinaryPath, "-tt", "--fpm-config", FPMConfigPath)
+
+	// Its own process group, killed as a group on timeout. Killing only the
+	// process leaves anything it started — a wrapper's child, an include that
+	// shells out — holding the pipe, so the read would block on a dead parent's
+	// descendants.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+
+		return os.ErrProcessDone
 	}
+
+	var captured bytes.Buffer
+	cmd.Stdout = &limitedWriter{w: &captured, remaining: maxParseOutput}
+	cmd.Stderr = cmd.Stdout
+
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("php-fpm -tt did not finish: %w", ctx.Err())
+		}
+
+		return nil, fmt.Errorf("failed to run php-fpm -tt: %w\nOutput: %s",
+			err, captured.String())
+	}
+	output := captured.Bytes()
 
 	fpmconfig, err := parseFPMConfigOutput(output)
 	if err != nil {
@@ -97,7 +154,7 @@ func ParseConfig(FPMBinaryPath string, FPMConfigPath string) (*EffectiveConfig, 
 	}
 	fpmConfigCacheLock.Unlock()
 
-	return fpmconfig, nil
+	return fpmconfig.clone(), nil
 }
 
 // parseFPMConfigOutput parses the report `php-fpm -tt` writes to stderr. Kept
@@ -168,4 +225,50 @@ func parseFPMConfigOutput(output []byte) (*EffectiveConfig, error) {
 	}
 
 	return fpmconfig, nil
+}
+
+// limitedWriter stops accepting once it has taken enough.
+//
+// Discards rather than erroring: a process that overruns is malfunctioning, and
+// the useful thing to report is what it said first, not that we gave up reading.
+type limitedWriter struct {
+	w         *bytes.Buffer
+	remaining int
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if l.remaining <= 0 {
+		return len(p), nil
+	}
+	if len(p) > l.remaining {
+		p = p[:l.remaining]
+	}
+	n, err := l.w.Write(p)
+	l.remaining -= n
+
+	return len(p), err
+}
+
+// clone returns a copy safe for a caller to keep or modify.
+func (c *EffectiveConfig) clone() *EffectiveConfig {
+	if c == nil {
+		return nil
+	}
+
+	out := &EffectiveConfig{
+		Global: make(map[string]string, len(c.Global)),
+		Pools:  make(map[string]map[string]string, len(c.Pools)),
+	}
+	for k, v := range c.Global {
+		out.Global[k] = v
+	}
+	for name, pool := range c.Pools {
+		copied := make(map[string]string, len(pool))
+		for k, v := range pool {
+			copied[k] = v
+		}
+		out.Pools[name] = copied
+	}
+
+	return out
 }

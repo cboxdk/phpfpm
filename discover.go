@@ -1,6 +1,7 @@
 package phpfpm
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -145,6 +146,15 @@ func masterIdentity(p *process.Process, log *slog.Logger) (binary, config string
 //
 // log may be nil.
 func Discover(log *slog.Logger) ([]Discovered, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultParseTimeout)
+	defer cancel()
+
+	return DiscoverContext(ctx, log)
+}
+
+// DiscoverContext is Discover with a caller-supplied deadline. It forks php-fpm
+// once per master, so a caller in a scrape loop should bound it.
+func DiscoverContext(ctx context.Context, log *slog.Logger) ([]Discovered, error) {
 	log = logOrDiscard(log)
 
 	procs, err := process.Processes()
@@ -160,7 +170,7 @@ func Discover(log *slog.Logger) ([]Discovered, error) {
 			continue
 		}
 
-		parsed, err := ParseConfig(exe, config)
+		parsed, err := ParseConfigContext(ctx, exe, config)
 		if err != nil {
 			log.Error("Failed to parse FPM config", "config", config, "error", err)
 			continue

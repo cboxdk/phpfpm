@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.26.6
 
 require (
-	github.com/cboxdk/fcgx v1.1.0
+	github.com/cboxdk/fcgx v1.2.0
 	github.com/shirou/gopsutil/v3 v3.24.5
 )
 

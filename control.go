@@ -215,8 +215,13 @@ func successor(target ReloadTarget, log *slog.Logger) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
+	want := filepath.Clean(target.ConfigPath)
 	for _, m := range found {
-		if m.ConfigPath == target.ConfigPath && m.PID > 0 && m.PID != target.PID {
+		// Cleaned, as VerifyMaster does. Comparing raw strings meant a caller who
+		// reloaded /etc/php/../php-fpm.conf successfully then failed to recognise
+		// the successor reporting /etc/php-fpm.conf — a false dead-master, and a
+		// rollback of a change that had just been adopted.
+		if filepath.Clean(m.ConfigPath) == want && m.PID > 0 && m.PID != target.PID {
 			return m.PID, true
 		}
 	}

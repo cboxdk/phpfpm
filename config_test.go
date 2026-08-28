@@ -1,7 +1,9 @@
 package phpfpm
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -121,58 +123,77 @@ EOF`
 	}
 }
 
+// TestParseFPMConfig_Caching proves what the cache is FOR — not re-forking
+// php-fpm on every scrape — rather than that every caller gets the same pointer.
+//
+// It used to assert pointer identity, which is an implementation detail and an
+// unsafe one: the same maps handed to every caller for the life of the process
+// means one caller editing a pool poisons every scrape that follows, and two
+// callers touching it at once panic on Go's map race detection. The test was
+// holding that in place.
 func TestParseFPMConfig_Caching(t *testing.T) {
-	// Create mock script
 	tempDir := t.TempDir()
 	mockFpmPath := tempDir + "/mock-php-fpm-cache"
 	configPath := tempDir + "/test-cache.conf"
+	forks := tempDir + "/forks"
 
+	// Records every invocation, so "was it cached" is measured rather than
+	// inferred from an address.
 	mockScript := `#!/bin/bash
+echo x >> ` + forks + `
 echo "[global]"
 echo "pid = /test/cache.pid"
 echo "[test]"
 echo "listen = /test/cache.sock"
 `
 
-	err := os.WriteFile(mockFpmPath, []byte(mockScript), 0755)
-	if err != nil {
+	if err := os.WriteFile(mockFpmPath, []byte(mockScript), 0o755); err != nil {
 		t.Fatalf("Failed to create mock script: %v", err)
 	}
 
-	// Clear cache
 	fpmConfigCacheLock.Lock()
 	fpmConfigCache = make(map[string]*EffectiveConfig)
 	fpmConfigCacheLock.Unlock()
 
-	// First call should parse
 	config1, err := ParseConfig(mockFpmPath, configPath)
 	if err != nil {
 		t.Fatalf("First ParseFPMConfig failed: %v", err)
 	}
 
-	// Second call should use cache
 	config2, err := ParseConfig(mockFpmPath, configPath)
 	if err != nil {
 		t.Fatalf("Second ParseFPMConfig failed: %v", err)
 	}
 
-	// Should be the same instance (cached)
-	if config1 != config2 {
-		t.Errorf("Expected cached config to be the same instance")
+	body, err := os.ReadFile(forks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(body), "x"); n != 1 {
+		t.Errorf("php-fpm was forked %d times for two calls; the cache is not being used", n)
 	}
 
-	// Verify cache contains the entry
+	if len(config2.Pools) != len(config1.Pools) {
+		t.Errorf("the cached result differs from the first: %v vs %v", config2.Pools, config1.Pools)
+	}
+
+	// Independent copies. A caller that edits what it was handed must not change
+	// what the next caller sees.
+	config1.Pools["test"]["listen"] = "/somewhere/else.sock"
+
+	config3, err := ParseConfig(mockFpmPath, configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config3.Pools["test"]["listen"]; got != "/test/cache.sock" {
+		t.Errorf("one caller's edit reached the next: listen = %q", got)
+	}
+
 	fpmConfigCacheLock.Lock()
-	cacheKey := mockFpmPath + "::" + configPath
-	cached, exists := fpmConfigCache[cacheKey]
+	_, exists := fpmConfigCache[mockFpmPath+"::"+configPath]
 	fpmConfigCacheLock.Unlock()
-
 	if !exists {
-		t.Errorf("Expected config to be cached")
-	}
-
-	if cached != config1 {
-		t.Errorf("Expected cached config to be the same as returned config")
+		t.Error("nothing was cached")
 	}
 }
 
@@ -430,5 +451,58 @@ func TestInvalidateConfigCache(t *testing.T) {
 
 	if remaining != 0 {
 		t.Errorf("%d entries survived a full invalidation", remaining)
+	}
+}
+
+// TestParseConfigDoesNotHangForever.
+//
+// ParseConfig forks php-fpm, and a fork with no bound is a scrape loop that
+// stops forever the first time the binary wedges — an NFS-backed include, an
+// operator's wrapper script, a host under memory pressure. The consumer is a
+// daemon that must keep observing whatever else is wrong.
+func TestParseConfigDoesNotHangForever(t *testing.T) {
+	// A "php-fpm" that never returns.
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "php-fpm")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := ParseConfigContext(ctx, stub, filepath.Join(dir, "php-fpm.conf"))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("a php-fpm that never returns was reported as a successful parse")
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("took %s to give up; the loop above this is stopped for that long", elapsed)
+	}
+}
+
+// TestParseConfigDoesNotSwallowUnboundedOutput: the output is a configuration
+// dump, which is kilobytes. Reading megabytes into memory to report that a
+// process is malfunctioning helps nobody.
+func TestParseConfigDoesNotSwallowUnboundedOutput(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "php-fpm")
+	// Writes far more than the cap, then fails.
+	script := "#!/bin/sh\nfor i in $(seq 1 200); do head -c 65536 /dev/zero | tr '\\0' 'x'; done\nexit 78\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	_, err := ParseConfigContext(ctx, stub, filepath.Join(dir, "php-fpm.conf"))
+	if err == nil {
+		t.Fatal("a failing php-fpm was reported as a successful parse")
+	}
+	if len(err.Error()) > 8<<20 {
+		t.Errorf("the error carries %d bytes of output; it was not bounded", len(err.Error()))
 	}
 }
