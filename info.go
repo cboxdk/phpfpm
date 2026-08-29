@@ -2,7 +2,6 @@ package phpfpm
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +44,21 @@ type Info struct {
 	Extensions []string
 }
 
+// clone returns a value no other caller holds a reference into. Nil stays nil,
+// so an error result is still distinguishable from an empty one.
+func (i *Info) clone() *Info {
+	if i == nil {
+		return nil
+	}
+
+	out := &Info{Version: i.Version}
+	if i.Extensions != nil {
+		out.Extensions = append([]string(nil), i.Extensions...)
+	}
+
+	return out
+}
+
 // resetPHPInfoCache clears the cache. Used by tests, which would otherwise
 // inherit whatever a previous test resolved.
 func resetPHPInfoCache() {
@@ -59,7 +73,12 @@ func GetPHPStats(ctx context.Context, target Target) (*Info, error) {
 
 	if entry, ok := phpInfoCache[target.Binary]; ok && time.Now().Before(entry.expiresAt) {
 		phpInfoMu.Unlock()
-		return entry.info, entry.err
+
+		// A COPY. The cached value is shared by every caller for this binary,
+		// and Info carries a slice — one caller sorting or appending to
+		// Extensions changes what every other caller sees, from a package that
+		// looks read-only.
+		return entry.info.clone(), entry.err
 	}
 
 	// A cold cache with N pools sharing a binary should fork once, not N times
@@ -68,8 +87,18 @@ func GetPHPStats(ctx context.Context, target Target) (*Info, error) {
 	// later scrape forever. So callers coalesce onto the first one's result.
 	if call, ok := phpInfoInFlight[target.Binary]; ok {
 		phpInfoMu.Unlock()
-		<-call.done
-		return call.info, call.err
+
+		// Waited for, but not indefinitely. Coalescing onto the first caller's
+		// fork is right; inheriting the first caller's PATIENCE is not — a
+		// scrape with a two-second budget sat behind a wedged binary until
+		// somebody else's timeout expired, and the deadline it was given bought
+		// it nothing.
+		select {
+		case <-call.done:
+			return call.info.clone(), call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	call := &phpInfoCall{done: make(chan struct{})}
@@ -90,7 +119,7 @@ func GetPHPStats(ctx context.Context, target Target) (*Info, error) {
 
 	close(call.done)
 
-	return call.info, call.err
+	return call.info.clone(), call.err
 }
 
 func readPHPInfo(ctx context.Context, binary string) (*Info, error) {
@@ -108,7 +137,7 @@ func readPHPInfo(ctx context.Context, binary string) (*Info, error) {
 }
 
 func getPHPVersion(ctx context.Context, bin string) (string, error) {
-	out, err := exec.CommandContext(ctx, bin, "-v").Output()
+	out, err := runBounded(ctx, bin, "-v")
 	if err != nil {
 		return "", err
 	}
@@ -120,7 +149,7 @@ func getPHPVersion(ctx context.Context, bin string) (string, error) {
 }
 
 func getPHPExtensions(ctx context.Context, bin string) ([]string, error) {
-	out, err := exec.CommandContext(ctx, bin, "-m").Output()
+	out, err := runBounded(ctx, bin, "-m")
 	if err != nil {
 		return nil, err
 	}

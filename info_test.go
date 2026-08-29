@@ -117,9 +117,23 @@ fi
 		t.Fatalf("Second GetPHPStats failed: %v", err)
 	}
 
-	// Should be the same instance
-	if info1 != info2 {
-		t.Errorf("Expected cached result to be the same instance")
+	// The same ANSWER, and deliberately not the same instance.
+	//
+	// It used to be the same pointer, and Info carries a slice — so one caller
+	// sorting or appending to Extensions changed what every other caller saw,
+	// from a package that reads as read-only. Two scrapes of the same binary
+	// are two callers.
+	if info1.Version != info2.Version || len(info1.Extensions) != len(info2.Extensions) {
+		t.Errorf("the cached answer changed between calls: %+v then %+v", info1, info2)
+	}
+	if info1 == info2 {
+		t.Error("both callers hold the same *Info; either can change what the other sees")
+	}
+	if len(info1.Extensions) > 0 {
+		info1.Extensions[0] = "mutated-by-one-caller"
+		if info2.Extensions[0] == "mutated-by-one-caller" {
+			t.Error("the extension list is shared: one caller's edit reached another's copy")
+		}
 	}
 
 	// The entry is cached per binary.
@@ -423,10 +437,15 @@ sleep 0.1
 		}
 	}
 
-	// All should be the same instance (cached)
+	// All the same answer, each its own copy. Coalescing onto one fork is the
+	// point; sharing the result out of it is the bug.
 	for i := 1; i < len(infos); i++ {
-		if infos[i] != infos[0] {
-			t.Errorf("Expected all concurrent calls to return the same cached instance")
+		if infos[i].Version != infos[0].Version {
+			t.Errorf("concurrent callers got different answers: %q and %q",
+				infos[i].Version, infos[0].Version)
+		}
+		if infos[i] == infos[0] {
+			t.Error("two concurrent callers hold the same *Info")
 		}
 	}
 }

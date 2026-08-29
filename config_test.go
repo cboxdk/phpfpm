@@ -506,3 +506,29 @@ func TestParseConfigDoesNotSwallowUnboundedOutput(t *testing.T) {
 		t.Errorf("the error carries %d bytes of output; it was not bounded", len(err.Error()))
 	}
 }
+
+// TestTheCacheKeyIsTheFileNotTheSpelling.
+//
+// The key was assembled separately where a parse is stored and where one is
+// invalidated, from whatever strings the caller happened to have. So parsing
+// /etc/php/../php-fpm.conf and invalidating /etc/php-fpm.conf — the same file —
+// were two different keys: the invalidation missed, and the stale parse stayed
+// available to every later caller with nothing left that could clear it.
+//
+// For a caller that writes pool configuration, a stale parse is the wrong
+// pm.max_children, believed indefinitely.
+func TestTheCacheKeyIsTheFileNotTheSpelling(t *testing.T) {
+	for _, tc := range []struct{ a, b [2]string }{
+		{[2]string{"/usr/sbin/php-fpm", "/etc/php/../php-fpm.conf"},
+			[2]string{"/usr/sbin/php-fpm", "/etc/php-fpm.conf"}},
+		{[2]string{"/usr/sbin/./php-fpm", "/etc/php-fpm.conf"},
+			[2]string{"/usr/sbin/php-fpm", "/etc/php-fpm.conf"}},
+		{[2]string{"/usr/sbin/php-fpm", "/etc//php-fpm.conf"},
+			[2]string{"/usr/sbin/php-fpm", "/etc/php-fpm.conf"}},
+	} {
+		if got, want := cacheKey(tc.a[0], tc.a[1]), cacheKey(tc.b[0], tc.b[1]); got != want {
+			t.Errorf("%q keys as %q and %q keys as %q; an invalidation of one leaves the "+
+				"other's parse in the cache for ever", tc.a, got, tc.b, want)
+		}
+	}
+}

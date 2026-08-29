@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -483,5 +484,48 @@ func TestReloadMasterRefusesTheWrongMaster(t *testing.T) {
 	// And the one that does match is still accepted.
 	if err := ReloadMaster(other.cmd.Process.Pid, other.configPath); err != nil {
 		t.Errorf("the master serving the named configuration was refused: %v", err)
+	}
+}
+
+// TestAReusedPidIsNotTheMasterThatWasSignalled.
+//
+// A pid is a small integer the kernel reuses. The settle window watched the
+// NUMBER, so a master that died during it and had its pid taken — on a busy
+// host, within the two seconds this watches for — was reported as having
+// survived its reload, and the configuration that killed it was left in place
+// for the next start to adopt.
+//
+// The start time is what makes a pid identify a process rather than a slot.
+func TestAReusedPidIsNotTheMasterThatWasSignalled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the start time is read from /proc, which only Linux has")
+	}
+
+	// This process, which is certainly alive and certainly started when it did.
+	self := os.Getpid()
+	started := processStartedAt(self)
+	if started == 0 {
+		t.Skip("no start time available for this process")
+	}
+
+	if !sameProcess(self, started) {
+		t.Error("a process was not recognised as itself")
+	}
+
+	// A different start time is a different process wearing the same number.
+	if sameProcess(self, started+1) {
+		t.Error("a pid whose process started at a different moment was accepted as the " +
+			"same one; that is the reused pid this exists to catch")
+	}
+}
+
+// TestNoStartTimeMeansNoOpinion: off Linux, and on a Linux host where /proc
+// cannot be read, the check has to stand aside rather than refuse. Failing a
+// reload because a hint was unavailable would be worse than the reuse it
+// guards against.
+func TestNoStartTimeMeansNoOpinion(t *testing.T) {
+	if !sameProcess(os.Getpid(), 0) {
+		t.Error("a zero start time was treated as a mismatch; on a platform that cannot " +
+			"read one, that refuses every reload")
 	}
 }

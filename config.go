@@ -43,8 +43,20 @@ func InvalidateConfigCache(binary, configPath string) {
 		return
 	}
 
-	delete(fpmConfigCache, binary+"::"+configPath)
+	delete(fpmConfigCache, cacheKey(binary, configPath))
 	fpmConfigEpoch++
+}
+
+// cacheKey is how a binary and a config path name one parse.
+//
+// Built in ONE place and cleaned, because it is used to store and to
+// invalidate, and the two were assembled separately from whatever strings the
+// caller had. Parsing /etc/php/../php-fpm.conf and invalidating
+// /etc/php-fpm.conf are the same file and were two different keys — so the
+// invalidation missed, and the stale parse stayed available to every later
+// caller with no way left to clear it.
+func cacheKey(binary, configPath string) string {
+	return filepath.Clean(binary) + "::" + filepath.Clean(configPath)
 }
 
 type EffectiveConfig struct {
@@ -92,7 +104,7 @@ func ParseConfigContext(ctx context.Context, FPMBinaryPath string, FPMConfigPath
 		return nil, fmt.Errorf("php-fpm binary must be an absolute path, got %q", FPMBinaryPath)
 	}
 
-	key := FPMBinaryPath + "::" + FPMConfigPath
+	key := cacheKey(FPMBinaryPath, FPMConfigPath)
 
 	fpmConfigCacheLock.Lock()
 	cached, ok := fpmConfigCache[key]

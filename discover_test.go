@@ -346,3 +346,40 @@ func TestDiscoverMastersAnswersWhenTheConfigDoesNot(t *testing.T) {
 		}
 	}
 }
+
+// TestABarePortIsNotProbedBeforeItIsBelieved.
+//
+// `listen = 9000` means what PHP-FPM's own documentation says it means, and
+// this used to decide by DIALLING — skipping the pool entirely when nothing
+// answered.
+//
+// For a caller that divides one memory budget between the pools it can see,
+// that is the worst possible failure: a master still starting up, or a host
+// under load, loses pools from discovery, their share goes to the neighbours,
+// the neighbours are reloaded with larger ceilings, and the pools come back to
+// a host committed past its memory. Whether a socket answers is the scrape's
+// question, and the scrape reports it as an unreachable pool rather than as no
+// pool at all.
+func TestABarePortIsNotProbedBeforeItIsBelieved(t *testing.T) {
+	// A port with certainly nothing on it.
+	if got := parseSocket("59999", nil); got != "tcp://127.0.0.1:59999" {
+		t.Errorf("parseSocket(\"59999\") = %q; a pool whose port is not answering right "+
+			"now has vanished from discovery, and its memory with it", got)
+	}
+
+	// The forms that were never in doubt.
+	for in, want := range map[string]string{
+		"/run/php/php-fpm.sock": "unix:///run/php/php-fpm.sock",
+		"127.0.0.1:9000":        "tcp://127.0.0.1:9000",
+		"[::1]:9000":            "tcp://[::1]:9000",
+	} {
+		if got := parseSocket(in, nil); got != want {
+			t.Errorf("parseSocket(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// And something that is not an address at all still yields nothing.
+	if got := parseSocket("not-a-port", nil); got != "" {
+		t.Errorf("parseSocket(\"not-a-port\") = %q, want empty", got)
+	}
+}

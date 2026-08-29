@@ -5,12 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/shirou/gopsutil/v3/process"
 )
@@ -243,24 +241,25 @@ func parseSocket(socket string, log *slog.Logger) string {
 		return "unix://" + socket
 	} else if strings.Contains(socket, ":") {
 		return "tcp://" + socket
-	} else {
-		// fallback if only a port is specified
-		try := []string{"127.0.0.1:" + socket, "[::1]:" + socket}
-		resolved := ""
-		for _, candidate := range try {
-			conn, err := net.DialTimeout("tcp", candidate, 500*time.Millisecond)
-			if err == nil {
-				_ = conn.Close()
-				resolved = candidate
-				break
-			} else {
-				log.Warn("Failed to connect to PHP-FPM socket", "socket", candidate, "error", err)
-			}
-		}
-		if resolved != "" {
-			return "tcp://" + resolved
-		}
 	}
+
+	// A bare port. PHP-FPM's own documented meaning is "listen on this port on
+	// all addresses", so the address is 127.0.0.1 and there is nothing to find
+	// out.
+	//
+	// This used to DIAL to decide, and skipped the pool entirely when nothing
+	// answered — so a master still starting up, or a host under load, lost pools
+	// from discovery altogether. For a caller that divides memory between the
+	// pools it can see, a pool that disappears has its share handed to its
+	// neighbours, and comes back to a host that is committed past its memory.
+	// Whether the socket answers is the scrape's question, and the scrape
+	// reports it as an unreachable pool rather than as no pool.
+	if _, err := strconv.Atoi(socket); err == nil {
+		return "tcp://127.0.0.1:" + socket
+	}
+
+	log.Warn("Cannot make sense of a listen address", "listen", socket)
+
 	return ""
 }
 

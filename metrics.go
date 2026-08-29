@@ -88,6 +88,37 @@ type PoolOutcome struct {
 	Err    error
 }
 
+// checkIsStatusFor decides whether a decoded response is this pool's status
+// page at all.
+//
+// A status page always names its pool. Anything else — an empty object, a
+// health endpoint, an application's own JSON at the same path — decodes into a
+// zero-valued Pool and used to come back with no error: a pool reported as
+// running no workers and having served nothing, which a caller that sizes pools
+// reads as a site nobody is using, and whose memory it then hands to the
+// neighbours.
+//
+// And it must be the pool that was ASKED for. A status path pointing at another
+// pool's socket returns that pool's numbers under this pool's name everywhere
+// downstream, so one site is measured and another site's ceiling is written
+// from it.
+//
+// Separated from the wire so it can be tested: making Go's own FastCGI
+// responder talk to this client is a protocol interop problem and not this
+// rule, and the rule is what has consequences.
+func checkIsStatusFor(reported, asked, path string) error {
+	if reported == "" {
+		return fmt.Errorf("the response at %s carries no pool name, so it is not a "+
+			"PHP-FPM status page", path)
+	}
+	if asked != "" && !strings.EqualFold(reported, asked) {
+		return fmt.Errorf("the status page at %s reports pool %q, not %q",
+			path, reported, asked)
+	}
+
+	return nil
+}
+
 // ScrapeAll scrapes every target. It returns one outcome per target, in the
 // order given, and an error only when nothing at all could be collected.
 //
@@ -195,12 +226,40 @@ func Scrape(ctx context.Context, target Target, log *slog.Logger) PoolOutcome {
 		return outcome
 	}
 
+	if err := checkIsStatusFor(pool.Name, target.Name, path); err != nil {
+		outcome.Err = err
+
+		return outcome
+	}
+
 	pool.Address = address
 	pool.Path = path
-	if conf, err := ParseConfig(target.Binary, target.ConfigPath); err == nil {
-		for section, values := range conf.Pools {
-			if strings.EqualFold(section, pool.Name) {
-				pool.Config = exportableConfig(values)
+	// The CALLER's context, not a background thirty seconds of this package's
+	// own. A scrape given a two-second budget could sit here for thirty inside a
+	// call it made — so a wedged binary stopped a loop that had explicitly said
+	// how long it was willing to wait.
+	if conf, err := ParseConfigContext(ctx, target.Binary, target.ConfigPath); err == nil {
+		// Exact first. PHP-FPM section names are case-SENSITIVE, so a host with
+		// pools called `api` and `API` has two different pools — and matching
+		// case-insensitively over a map, whose iteration order is random, gave
+		// whichever the range happened to reach last. For a caller that writes
+		// pm.max_children from this, that is acting on another site's numbers,
+		// differently on each run.
+		if values, ok := conf.Pools[pool.Name]; ok {
+			pool.Config = exportableConfig(values)
+		} else {
+			// Case-insensitively only when it is unambiguous, for the operator
+			// who wrote [Www] in one file and www in another.
+			var match map[string]string
+			found := 0
+			for section, values := range conf.Pools {
+				if strings.EqualFold(section, pool.Name) {
+					match = values
+					found++
+				}
+			}
+			if found == 1 {
+				pool.Config = exportableConfig(match)
 			}
 		}
 		result.Global = exportableConfig(conf.Global)

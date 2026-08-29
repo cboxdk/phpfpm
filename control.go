@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -42,11 +41,19 @@ func Validate(ctx context.Context, binary, configPath string) error {
 		args = append(args, "--fpm-config", configPath)
 	}
 
-	cmd := exec.CommandContext(ctx, binary, args...)
-
 	// php-fpm writes its test report to stderr, including on success.
-	output, err := cmd.CombinedOutput()
+	//
+	// Through runBounded rather than CombinedOutput: this decides whether a
+	// configuration reaches a production host, and a validation that never
+	// returns is a tool that stops. CombinedOutput reads to EOF and killed only
+	// the direct child, so a wrapper's own child holding the pipe outlived the
+	// timeout that was supposed to bound it.
+	output, err := runBounded(ctx, binary, args...)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("php-fpm did not finish checking the configuration: %w", ctxErr)
+		}
+
 		return fmt.Errorf("php-fpm rejected the configuration: %w\n%s", err, strings.TrimSpace(string(output)))
 	}
 
@@ -138,6 +145,16 @@ func ReloadAndWait(ctx context.Context, target ReloadTarget, settle time.Duratio
 
 	log.Debug("Reloaded php-fpm master", "pid", target.PID, "settle", settle)
 
+	// The pid the signal went to, and WHEN that process started.
+	//
+	// A pid is a small integer the kernel reuses. Watching the number alone
+	// meant a master that died during its settle window and had its pid taken by
+	// something else — on a busy host, within the two seconds this watches for —
+	// was reported as having survived, and the configuration that killed it left
+	// in place. The start time is what makes the pid identify a process rather
+	// than a slot.
+	started := processStartedAt(target.PID)
+
 	deadline := time.Now().Add(settle)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -145,11 +162,21 @@ func ReloadAndWait(ctx context.Context, target ReloadTarget, settle time.Duratio
 		}
 
 		switch {
-		case processAlive(target.PID):
+		case processAlive(target.PID) && sameProcess(target.PID, started):
 			// Still the same process. Keep watching until the settle window is
 			// over: a master that fails to re-read its configuration dies a
 			// moment after the signal, not instantly.
 			if time.Now().After(deadline) {
+				// Asked once more, by identity rather than by liveness. The
+				// start-time check above catches a pid taken by ANY process;
+				// this catches the narrower case of a pid taken by another
+				// php-fpm master, and it is the check the rest of this package
+				// trusts to decide what may be signalled.
+				if err := verifyMaster(target.PID, target.ConfigPath); err != nil {
+					return 0, fmt.Errorf("php-fpm master %d did not survive the reload: %w",
+						target.PID, err)
+				}
+
 				return target.PID, nil
 			}
 
@@ -303,6 +330,17 @@ func verifyMaster(pid int, configPath string) error {
 }
 
 // processAlive reports whether a pid is still running, without disturbing it.
+// sameProcess reports whether pid is still the process it was when started was
+// taken. Zero means the start time could not be read, and then this cannot
+// speak — the liveness and identity checks are all there is.
+func sameProcess(pid int, started uint64) bool {
+	if started == 0 {
+		return true
+	}
+
+	return processStartedAt(pid) == started
+}
+
 func processAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
