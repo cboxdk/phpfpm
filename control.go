@@ -308,8 +308,19 @@ func processAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
 
-	return proc.Signal(syscall.Signal(0)) == nil
+	// A zombie answers signal 0 and is not a running master.
+	//
+	// It only arises when the caller is the process's parent, or when an init
+	// that does not reap has adopted it — narrow, but the whole point of this
+	// function is to decide whether php-fpm survived a reload, and a process
+	// that has exited and is waiting to be collected did not. The signal check
+	// alone reports it as healthy for as long as nobody reaps it, which on an
+	// unreaping PID 1 is forever.
+	return !isZombie(pid)
 }
 
 // MasterPID reads a php-fpm master's pid from its pid file.
