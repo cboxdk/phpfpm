@@ -51,5 +51,8 @@ tidy-check: ## Fail if `go mod tidy` would change go.mod or go.sum
 	fi; \
 	echo "✅ go.mod tidy"
 
-check: fmt-check tidy-check vet lint test vulncheck ## Everything CI runs
+# Not "everything CI runs": CI also runs the suite with a real php-fpm installed,
+# which is when the control and validation tests stop skipping. A gate whose name
+# overstates it sends people to CI to be surprised by it.
+check: fmt-check tidy-check vet lint test vulncheck ## Everything CI runs EXCEPT the pass with a real php-fpm installed
 	@echo "✅ All checks passed"

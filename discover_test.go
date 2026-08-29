@@ -1,8 +1,15 @@
 package phpfpm
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestFmpNamePattern(t *testing.T) {
@@ -215,35 +222,85 @@ func TestExtractConfigFromMaster(t *testing.T) {
 	}
 }
 
-func TestDiscoverFPMProcesses_MockImplementation(t *testing.T) {
-	if os.Getenv("CI") == "true" {
-		t.Skip("Skipping discovery test in CI environment")
+// TestDiscoverFindsARunningMaster.
+//
+// This replaces a test that skipped itself in CI and, when it did run, asserted
+// only that the function returned without panicking — avoiding the one
+// environment where it could have been a signal, and proving nothing in the
+// others.
+//
+// With a real php-fpm it can say something: a master that is running is found,
+// with the pool it serves and the pid to signal.
+func TestDiscoverFindsARunningMaster(t *testing.T) {
+	fpm := lookupFPM(t)
+
+	root := t.TempDir()
+	pools := filepath.Join(root, "pool.d")
+	if err := os.MkdirAll(pools, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	// Note: This test is limited because we can't easily mock the process.Processes() call
-	// In a real implementation, we would need to use dependency injection or build tags
-	// to replace the process discovery mechanism for testing
+	port := 25000 + (os.Getpid() % 10000)
+	name := fmt.Sprintf("disco%d", os.Getpid())
 
-	// For now, we test that the function exists and returns without panicking
-	discovered, err := Discover(nil)
+	conf := filepath.Join(root, "php-fpm.conf")
+	if err := os.WriteFile(conf, fmt.Appendf(nil,
+		"[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ndaemonize = yes\ninclude=%s/*.conf\n",
+		root, root, pools), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pools, name+".conf"), fmt.Appendf(nil,
+		"[%s]\nlisten = 127.0.0.1:%d\npm = dynamic\npm.max_children = 7\n"+
+			"pm.start_servers = 2\npm.min_spare_servers = 1\npm.max_spare_servers = 3\n"+
+			"pm.status_path = /status\n", name, port), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	// We expect this to work even if no FPM processes are found
+	if out, err := exec.Command(fpm, "--fpm-config", conf).CombinedOutput(); err != nil {
+		t.Skipf("php-fpm would not start here: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		if pid, err := os.ReadFile(filepath.Join(root, "fpm.pid")); err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(string(pid))); err == nil {
+				if p, err := os.FindProcess(n); err == nil {
+					_ = p.Signal(syscall.SIGTERM)
+				}
+			}
+		}
+	})
+
+	if !waitFor(t, 10*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(root, "fpm.pid"))
+
+		return err == nil
+	}) {
+		t.Skip("php-fpm wrote no pid file")
+	}
+
+	found, err := Discover(nil)
 	if err != nil {
-		// Only fail if it's a fundamental error (not "no processes found")
-		// Most systems won't have FPM running during tests
-		t.Logf("DiscoverFPMProcesses returned error (expected in test environment): %v", err)
+		t.Fatalf("Discover: %v", err)
 	}
 
-	// Should return a slice (even if empty)
-	if discovered == nil {
-		t.Errorf("Expected DiscoverFPMProcesses to return non-nil slice")
+	for _, d := range found {
+		if d.Name != name {
+			continue
+		}
+		if d.PID <= 0 {
+			t.Errorf("the pool was found without the pid to signal: %+v", d)
+		}
+		if d.MaxChildren != 7 {
+			t.Errorf("MaxChildren = %d, want the configured 7", d.MaxChildren)
+		}
+		if d.ConfigPath != conf {
+			t.Errorf("ConfigPath = %q, want %q", d.ConfigPath, conf)
+		}
+
+		return
 	}
 
-	// Log the results for debugging
-	t.Logf("Discovered %d FPM processes", len(discovered))
-	for i, fpm := range discovered {
-		t.Logf("FPM %d: Binary=%s, Socket=%s, StatusPath=%s", i, fpm.Binary, fpm.Socket, fpm.StatusPath)
-	}
+	t.Errorf("a running master serving pool %q was not discovered among %d found",
+		name, len(found))
 }
 
 // TestDiscoverMastersAnswersWhenTheConfigDoesNot is the whole point of the
