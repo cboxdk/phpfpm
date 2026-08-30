@@ -114,6 +114,11 @@ if err != nil {
 | Invalidate the parse cache | `InvalidateConfigCache` — after you change a configuration |
 
 Full reference: [pkg.go.dev/github.com/cboxdk/phpfpm](https://pkg.go.dev/github.com/cboxdk/phpfpm).
+Longer-form documentation is in [`docs/`](docs/index.md): guides for
+[reading a host](docs/guides/reading-a-host.md),
+[reloading safely](docs/guides/reloading-safely.md), and
+[the configuration cache](docs/guides/the-config-cache.md), plus the design
+notes below in full.
 
 ## Why it is shaped the way it is
 
