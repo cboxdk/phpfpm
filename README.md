@@ -183,9 +183,14 @@ destinations, and it makes tests order-dependent.
 ## Development
 
 ```bash
-make check        # fmt, tidy, vet, lint, race, vulncheck
+make check        # fmt, tidy, vet, lint, race, vulncheck, license-check
 go test ./...     # the suite runs against a real php-fpm when one is installed
 ```
+
+## Security
+
+This library execs php-fpm and signals masters, so its trust boundaries matter.
+Found a way past one? See [SECURITY.md](SECURITY.md) — please report it privately.
 
 ## Provenance
 
