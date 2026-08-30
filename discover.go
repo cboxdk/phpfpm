@@ -34,6 +34,14 @@ type Discovered struct {
 	MaxChildren    int
 	ProcessManager string
 
+	// Workload is the value of env[FPM_TUNE_WORKLOAD] in the pool's config, when
+	// it set one — a free-form hint a consumer that sizes pools can read to know
+	// what the pool does before it has measured it. Empty when unset. This
+	// package does not interpret it; it only carries what the config declared,
+	// because the config is the one place a per-pool hint can live and be
+	// discovered without a second file.
+	Workload string
+
 	// PID is the master process serving this pool.
 	//
 	// Carried from the process scan because the pid file is not a reliable
@@ -192,6 +200,7 @@ func DiscoverContext(ctx context.Context, log *slog.Logger) ([]Discovered, error
 
 			maxChildren, _ := strconv.Atoi(strings.TrimSpace(poolConfig["pm.max_children"]))
 			processManager := strings.TrimSpace(poolConfig["pm"])
+			workload := strings.TrimSpace(poolConfig["env[FPM_TUNE_WORKLOAD]"])
 
 			// "pm.status_listen", with the prefix `php-fpm -tt` actually emits.
 			// Looking up the bare name always missed, so a pool exposing its
@@ -223,6 +232,7 @@ func DiscoverContext(ctx context.Context, log *slog.Logger) ([]Discovered, error
 
 				MaxChildren:    maxChildren,
 				ProcessManager: processManager,
+				Workload:       workload,
 			})
 
 			log.Debug("Discovered php-fpm pool",

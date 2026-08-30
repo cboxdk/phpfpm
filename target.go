@@ -44,6 +44,11 @@ type Target struct {
 	MaxChildren    int    `mapstructure:"-"`
 	ProcessManager string `mapstructure:"-"`
 
+	// Workload is env[FPM_TUNE_WORKLOAD] from the pool's config, when it set one.
+	// Carried, not interpreted — a consumer that sizes pools reads it as a hint
+	// about what the pool does. Empty when unset.
+	Workload string `mapstructure:"workload"`
+
 	// PID is the master serving this pool, when it is known. Zero means unknown,
 	// not "no master".
 	PID int `mapstructure:"-"`
@@ -100,6 +105,7 @@ func TargetFromDiscovered(d Discovered) Target {
 
 		MaxChildren:    d.MaxChildren,
 		ProcessManager: d.ProcessManager,
+		Workload:       d.Workload,
 	}
 }
 
