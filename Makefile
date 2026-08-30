@@ -62,7 +62,7 @@ tidy-check: ## Fail if `go mod tidy` would change go.mod or go.sum
 # the main module's own pseudo-version (…-<time>-<hash>), which changes every commit
 # so the committed file referenced the PREVIOUS one. Platform stripped, the
 # pseudo-version's timestamp-hash folded to "devel".
-SBOM_CLEAN = del(.metadata.timestamp) | del(.metadata.tools) | walk(if type == "string" then (gsub("go(os|arch)=[^&]*&"; "") | gsub("[0-9]{14}-[0-9a-f]{7,}"; "devel")) else . end)
+SBOM_CLEAN = del(.metadata.timestamp) | del(.metadata.tools) | walk(if type == "string" then (gsub("go(os|arch)=[^&]*&"; "") | gsub("v[0-9][^\"?]*[0-9]{14}-[0-9a-f]{7,}"; "devel")) else . end)
 SBOM_GEN = cyclonedx-gomod mod -json -licenses -noserial -output - . | \
 	jq '$(SBOM_CLEAN)'
 

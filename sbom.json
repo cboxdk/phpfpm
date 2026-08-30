@@ -5,11 +5,11 @@
   "version": 1,
   "metadata": {
     "component": {
-      "bom-ref": "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?type=module",
+      "bom-ref": "pkg:golang/github.com/cboxdk/phpfpm@devel?type=module",
       "type": "application",
       "name": "github.com/cboxdk/phpfpm",
-      "version": "v1.0.0",
-      "purl": "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?type=module",
+      "version": "devel",
+      "purl": "pkg:golang/github.com/cboxdk/phpfpm@devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/cboxdk/phpfpm",
@@ -87,10 +87,10 @@
       }
     },
     {
-      "bom-ref": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
+      "bom-ref": "pkg:golang/github.com/lufia/plan9stats@devel?type=module",
       "type": "library",
       "name": "github.com/lufia/plan9stats",
-      "version": "v0.0.0-devel",
+      "version": "devel",
       "scope": "required",
       "hashes": [
         {
@@ -98,7 +98,7 @@
           "content": "e84fb86b418ee736449d9f35a48af4c8bbed51693689ff7cdaa037177403e87e"
         }
       ],
-      "purl": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
+      "purl": "pkg:golang/github.com/lufia/plan9stats@devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/lufia/plan9stats",
@@ -116,10 +116,10 @@
       }
     },
     {
-      "bom-ref": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
+      "bom-ref": "pkg:golang/github.com/power-devops/perfstat@devel?type=module",
       "type": "library",
       "name": "github.com/power-devops/perfstat",
-      "version": "v0.0.0-devel",
+      "version": "devel",
       "scope": "required",
       "hashes": [
         {
@@ -127,7 +127,7 @@
           "content": "9dcabf98fc1017826380396b5449f70b5d55a061d937b9bcaa287080c12dcd8c"
         }
       ],
-      "purl": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
+      "purl": "pkg:golang/github.com/power-devops/perfstat@devel?type=module",
       "externalReferences": [
         {
           "url": "https://github.com/power-devops/perfstat",
@@ -315,7 +315,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:golang/github.com/cboxdk/phpfpm@v1.0.0?type=module",
+      "ref": "pkg:golang/github.com/cboxdk/phpfpm@devel?type=module",
       "dependsOn": [
         "pkg:golang/github.com/cboxdk/fcgx@v1.2.0?type=module",
         "pkg:golang/github.com/shirou/gopsutil/v3@v3.24.5?type=module"
@@ -331,10 +331,10 @@
       ]
     },
     {
-      "ref": "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module"
+      "ref": "pkg:golang/github.com/lufia/plan9stats@devel?type=module"
     },
     {
-      "ref": "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
+      "ref": "pkg:golang/github.com/power-devops/perfstat@devel?type=module",
       "dependsOn": [
         "pkg:golang/golang.org/x/sys@v0.47.0?type=module"
       ]
@@ -343,8 +343,8 @@
       "ref": "pkg:golang/github.com/shirou/gopsutil/v3@v3.24.5?type=module",
       "dependsOn": [
         "pkg:golang/github.com/go-ole/go-ole@v1.2.6?type=module",
-        "pkg:golang/github.com/lufia/plan9stats@v0.0.0-devel?type=module",
-        "pkg:golang/github.com/power-devops/perfstat@v0.0.0-devel?type=module",
+        "pkg:golang/github.com/lufia/plan9stats@devel?type=module",
+        "pkg:golang/github.com/power-devops/perfstat@devel?type=module",
         "pkg:golang/github.com/shoenig/go-m1cpu@v0.1.6?type=module",
         "pkg:golang/github.com/tklauser/go-sysconf@v0.3.12?type=module",
         "pkg:golang/github.com/tklauser/numcpus@v0.6.1?type=module",
