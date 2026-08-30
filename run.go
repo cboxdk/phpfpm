@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"syscall"
 )
 
@@ -34,10 +33,20 @@ const maxCapturedOutput = 4 << 20
 // here — a scrape loop with a two-second budget should not be able to sit for
 // thirty inside a call it made.
 func runBounded(ctx context.Context, binary string, args ...string) ([]byte, error) {
-	// A relative name is resolved through PATH, and PATH is the attacker's
-	// variable when this runs as root.
-	if !filepath.IsAbs(binary) {
-		return nil, fmt.Errorf("php binary must be an absolute path, got %q", binary)
+	// The full trust check, HERE, where the exec happens.
+	//
+	// It used to run only at discovery, on paths read out of the process table —
+	// and every other route to a binary went straight to exec. A caller can
+	// supply one from a file: fpm-tune remembers where php-fpm lives so it can
+	// repair a host with nothing running to discover, and that record is on
+	// disk. A state file an attacker can write is then a binary this process
+	// runs, usually as root.
+	//
+	// Checking at the point of USE rather than at the point of discovery is the
+	// difference between a guard on one path and a guard on the property. The
+	// cost is an Lstat and a walk up the directory chain, a few times per round.
+	if err := trustedPath(binary); err != nil {
+		return nil, fmt.Errorf("refusing to run %s: %w", binary, err)
 	}
 
 	cmd := exec.CommandContext(ctx, binary, args...)

@@ -153,6 +153,16 @@ func ParseConfigContext(ctx context.Context, FPMBinaryPath string, FPMConfigPath
 		return nil, fmt.Errorf("failed to run php-fpm -tt: %w\nOutput: %s",
 			err, captured.String())
 	}
+	if limited, ok := cmd.Stdout.(*limitedWriter); ok && limited.truncated {
+		// A PARTIAL configuration is not a configuration. Parsing the prefix
+		// gives a clean-looking answer that is missing every pool after the cut,
+		// and a caller that writes pool settings will read those pools as
+		// removed and take their overrides out.
+		return nil, fmt.Errorf("php-fpm -tt produced more than %d bytes of output and the "+
+			"configuration would be incomplete; the pools after the cut would look as "+
+			"though they had been deleted", maxParseOutput)
+	}
+
 	output := captured.Bytes()
 
 	fpmconfig, err := parseFPMConfigOutput(output)
@@ -243,17 +253,29 @@ func parseFPMConfigOutput(output []byte) (*EffectiveConfig, error) {
 //
 // Discards rather than erroring: a process that overruns is malfunctioning, and
 // the useful thing to report is what it said first, not that we gave up reading.
+// limitedWriter caps what is captured, and REMEMBERS that it did.
+//
+// Silently discarding the overflow was worse than the unbounded read it
+// replaced. `php-fpm -tt` prints the effective configuration in include order,
+// so a truncated capture parses cleanly into a config that is missing every
+// pool after the cut — and a caller that writes configuration then treats those
+// pools as gone. On a shared host one tenant with a few thousand env lines in
+// their own pool file can push everybody after them past the cap.
 type limitedWriter struct {
 	w         *bytes.Buffer
 	remaining int
+	truncated bool
 }
 
 func (l *limitedWriter) Write(p []byte) (int, error) {
 	if l.remaining <= 0 {
+		l.truncated = true
+
 		return len(p), nil
 	}
 	if len(p) > l.remaining {
 		p = p[:l.remaining]
+		l.truncated = true
 	}
 	n, err := l.w.Write(p)
 	l.remaining -= n

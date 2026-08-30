@@ -1,6 +1,7 @@
 package phpfpm
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -530,5 +531,48 @@ func TestTheCacheKeyIsTheFileNotTheSpelling(t *testing.T) {
 			t.Errorf("%q keys as %q and %q keys as %q; an invalidation of one leaves the "+
 				"other's parse in the cache for ever", tc.a, got, tc.b, want)
 		}
+	}
+}
+
+// TestATruncatedParseIsNotAConfiguration.
+//
+// `php-fpm -tt` prints the effective configuration in include order, and the
+// capture is capped so a binary that will not stop talking cannot fill memory.
+// The overflow was discarded silently, which is worse than the unbounded read
+// it replaced: the prefix parses cleanly into a configuration that is missing
+// every pool after the cut.
+//
+// A caller that writes pool settings then reads those pools as REMOVED and
+// takes their overrides out — so a site held at 8 workers by this tooling jumps
+// back to its own pm.max_children on the next reload. On a shared host, one
+// tenant with a few thousand env lines in their own pool file pushes everybody
+// after them past the cap.
+func TestATruncatedParseIsNotAConfiguration(t *testing.T) {
+	var b bytes.Buffer
+	w := &limitedWriter{w: &b, remaining: 16}
+
+	if _, err := w.Write([]byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	if w.truncated {
+		t.Fatal("a write inside the cap was reported as truncated")
+	}
+
+	if _, err := w.Write([]byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	if !w.truncated {
+		t.Error("a write past the cap was not recorded; the parse that follows looks " +
+			"complete and is missing every pool after the cut")
+	}
+
+	// And once past it, further writes are still remembered as truncation
+	// rather than passing silently.
+	w2 := &limitedWriter{w: &bytes.Buffer{}, remaining: 0}
+	if _, err := w2.Write([]byte("anything")); err != nil {
+		t.Fatal(err)
+	}
+	if !w2.truncated {
+		t.Error("a write to a full buffer was discarded without a trace")
 	}
 }

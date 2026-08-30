@@ -529,3 +529,46 @@ func TestNoStartTimeMeansNoOpinion(t *testing.T) {
 			"read one, that refuses every reload")
 	}
 }
+
+// TestABinaryFromAFileIsNotRunUnchecked.
+//
+// The trust check ran at DISCOVERY, on paths read out of the process table, and
+// every other route to a binary went straight to exec. A caller can supply one
+// from a file: fpm-tune remembers where php-fpm lives so it can repair a host
+// with nothing running to discover, and that record is on disk. A state file an
+// attacker can write is then a binary this process runs — usually as root.
+//
+// Checking at the point of USE rather than at the point of discovery is the
+// difference between a guard on one path and a guard on the property.
+func TestABinaryFromAFileIsNotRunUnchecked(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root owns everything, so the ownership check cannot be staged")
+	}
+
+	// A binary in a WORLD-writable directory without the sticky bit, which is
+	// refused whether or not this runs as root. Running as root the check is
+	// stricter still — every ancestor must be root-owned — but a test cannot
+	// stage that as an ordinary user, and this shape is the one that matters
+	// either way.
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(dir, "fake-php-fpm")
+	if err := os.WriteFile(binary,
+		[]byte("#!/bin/sh\ntouch "+filepath.Join(dir, "ran")+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Validate(context.Background(), binary, filepath.Join(dir, "pwn.conf"))
+	if err == nil {
+		t.Fatal("a binary from a writable directory was executed")
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "ran")); serr == nil {
+		t.Error("it ran: a path out of a file reached exec without the trust check that " +
+			"discovery applies to paths out of the process table")
+	}
+	if !strings.Contains(err.Error(), "refusing to run") {
+		t.Errorf("the refusal does not say what it refused:\n%v", err)
+	}
+}
