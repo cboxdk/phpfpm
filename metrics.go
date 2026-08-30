@@ -40,6 +40,19 @@ type PoolProcess struct {
 	// worker could not be read, usually because it exited between the status
 	// response and the lookup.
 	CurrentRSS int64 `json:"current_rss"`
+
+	// SubtreeRSS is the resident memory of the worker AND every process it
+	// spawned — the ffmpeg or imagemagick a request shelled out to, each a
+	// separate pid the status page and CurrentRSS both miss. It is always at
+	// least CurrentRSS; the difference is what the children cost. Zero means it
+	// was not measured (no process snapshot this scrape), which is distinct from
+	// a measured subtree that equals CurrentRSS because nothing was spawned.
+	//
+	// Point-in-time: a child that lived and died between two scrapes is not in
+	// it, and one whose worker exited first has reparented away from the subtree.
+	// It is the per-worker view; a cgroup's own high-water mark, where there is a
+	// cgroup, catches the transients this cannot.
+	SubtreeRSS int64 `json:"subtree_rss"`
 }
 
 type Pool struct {
@@ -137,6 +150,13 @@ func ScrapeAll(ctx context.Context, targets []Target, log *slog.Logger) ([]PoolO
 	// a measured 9.0s of a 15s budget, and healthy pools later in the list
 	// returned nothing at all. Bounded, because each pool in flight is a
 	// FastCGI connection plus, for opcache, a PHP request.
+	// One snapshot of the process table for the whole round, taken before the
+	// pools are scraped and shared by all of them. Every pool's subtree is then
+	// measured against the same instant — which is what makes their numbers
+	// comparable — and the walk of /proc is paid for once rather than once per
+	// pool on a host running forty of them.
+	snap := snapshotProcesses()
+
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, min(len(targets), max(4, runtime.NumCPU())))
 
@@ -148,7 +168,7 @@ func ScrapeAll(ctx context.Context, targets []Target, log *slog.Logger) ([]PoolO
 			slots <- struct{}{}
 			defer func() { <-slots }()
 
-			outcome := Scrape(ctx, target, log)
+			outcome := scrape(ctx, target, snap, log)
 			if outcome.Err != nil {
 				log.Warn("Pool scrape failed",
 					"pool", outcome.Name, "socket", outcome.Socket, "err", outcome.Err)
@@ -170,8 +190,20 @@ func ScrapeAll(ctx context.Context, targets []Target, log *slog.Logger) ([]PoolO
 // Scrape reads one pool's status page. Its client and response body close at the
 // end of this call rather than at the end of a whole batch.
 //
+// It takes its own snapshot of the process table to measure worker subtrees;
+// ScrapeAll shares one across pools instead. See scrape.
+//
 // log may be nil.
 func Scrape(ctx context.Context, target Target, log *slog.Logger) PoolOutcome {
+	return scrape(ctx, target, snapshotProcesses(), log)
+}
+
+// scrape is Scrape with the process snapshot supplied, so a batch can build one
+// snapshot for the whole round. A nil snapshot is valid — subtree RSS is then
+// left unmeasured and only each worker's own RSS is filled.
+//
+// log may be nil.
+func scrape(ctx context.Context, target Target, snap *processSnapshot, log *slog.Logger) PoolOutcome {
 	log = logOrDiscard(log)
 
 	outcome := PoolOutcome{Name: target.label(), Socket: target.statusAddress()}
@@ -267,7 +299,7 @@ func Scrape(ctx context.Context, target Target, log *slog.Logger) PoolOutcome {
 
 	// PHP-FPM does not report worker memory; it has to be read from the OS using
 	// the pids the status page provides. See rss.go.
-	enrichWorkerRSS(&pool, log)
+	enrichWorkerRSS(&pool, snap, log)
 
 	recountProcesses(&pool, target.StatusPath)
 
