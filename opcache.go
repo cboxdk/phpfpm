@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/cboxdk/fcgx"
@@ -161,6 +162,20 @@ func GetOpcacheStatus(ctx context.Context, target Target) (*OpcacheStatus, error
 	body, err := fcgx.ReadBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read opcache response: %w", err)
+	}
+
+	return parseOpcacheStatus(body)
+}
+
+// parseOpcacheStatus turns an opcache_get_status() response into a status.
+//
+// opcache_get_status() returns false when OPcache is disabled — for this SAPI, or
+// not compiled in. json_encode(false) is the literal `false`, not an object, so
+// unmarshalling it into the struct fails: that is treated as "disabled" rather than
+// a parse error, or a host without OPcache logs a failure on every scrape.
+func parseOpcacheStatus(body []byte) (*OpcacheStatus, error) {
+	if trimmed := strings.TrimSpace(string(body)); trimmed == "false" || trimmed == "null" || trimmed == "" {
+		return &OpcacheStatus{}, nil
 	}
 
 	var status OpcacheStatus

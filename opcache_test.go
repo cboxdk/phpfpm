@@ -8,6 +8,44 @@ import (
 	"testing"
 )
 
+// TestParseOpcacheStatusHandlesDisabled: opcache_get_status() returns `false` when
+// OPcache is off for this SAPI. That is a normal state, not a parse error — a host
+// without OPcache used to log "failed to parse opcache JSON: cannot unmarshal bool"
+// on every scrape.
+func TestParseOpcacheStatusHandlesDisabled(t *testing.T) {
+	for _, body := range []string{"false", "null", "  false\n", ""} {
+		status, err := parseOpcacheStatus([]byte(body))
+		if err != nil {
+			t.Errorf("parseOpcacheStatus(%q) errored on a disabled opcache: %v", body, err)
+		}
+		if status == nil || status.Enabled {
+			t.Errorf("parseOpcacheStatus(%q) = %+v, want a disabled status", body, status)
+		}
+	}
+}
+
+// TestParseOpcacheStatusReadsAnEnabledStatus keeps the ordinary path working.
+func TestParseOpcacheStatusReadsAnEnabledStatus(t *testing.T) {
+	status, err := parseOpcacheStatus([]byte(`{"opcache_enabled":true,"opcache_statistics":{"hits":42}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Enabled {
+		t.Error("an enabled opcache read as disabled")
+	}
+	if status.Statistics.Hits != 42 {
+		t.Errorf("hits = %d, want 42", status.Statistics.Hits)
+	}
+}
+
+// TestParseOpcacheStatusStillRejectsGarbage: only false/null/empty are "disabled";
+// a truncated object is still an error worth seeing.
+func TestParseOpcacheStatusStillRejectsGarbage(t *testing.T) {
+	if _, err := parseOpcacheStatus([]byte(`{"opcache_enabled":`)); err == nil {
+		t.Error("a truncated opcache response was accepted")
+	}
+}
+
 func TestOpcacheStatus_Structure(t *testing.T) {
 	// Test OpcacheStatus structure
 	status := OpcacheStatus{
