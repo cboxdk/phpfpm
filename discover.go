@@ -73,6 +73,24 @@ type Master struct {
 	ConfigPath string
 }
 
+// Unstatused is a pool that exists but exposes no pm.status_path, so it cannot be
+// scraped for the live metrics the normal results carry — and is left out of them
+// for exactly that reason.
+//
+// It is surfaced separately rather than dropped silently: a bare php-fpm ships its
+// default `www` pool with pm.status_path commented out, so a tool that needs the
+// status page finds nothing on a stock install and reports it as "no pools", which
+// sends the operator looking for a master that is running the whole time. Carrying
+// the pool lets a caller say what is actually wrong, and — if it manages the host —
+// turn the status page on rather than asking the operator to hand-edit a file.
+type Unstatused struct {
+	Name       string
+	ConfigPath string // the master config the pool is defined under
+	Binary     string // the master's php-fpm binary
+	PID        int    // the master serving it
+	Socket     string // the pool's listen socket, where the status page would be served
+}
+
 // DiscoverMasters scans the process table for php-fpm masters.
 //
 // The binary and config path still go through the trust checks — they are about
@@ -161,14 +179,36 @@ func Discover(log *slog.Logger) ([]Discovered, error) {
 // DiscoverContext is Discover with a caller-supplied deadline. It forks php-fpm
 // once per master, so a caller in a scrape loop should bound it.
 func DiscoverContext(ctx context.Context, log *slog.Logger) ([]Discovered, error) {
+	found, _, err := discoverContext(ctx, log)
+
+	return found, err
+}
+
+// UnstatusedPools returns the pools found on the host that have no pm.status_path,
+// so cannot be scraped and are left out of DiscoverContext's results.
+//
+// It runs the same scan DiscoverContext does — one fork of php-fpm per master — so
+// it is for the two places that need it rather than a hot loop: reporting honestly
+// why nothing was found, and enabling the status page for the pools that lack it.
+func UnstatusedPools(ctx context.Context, log *slog.Logger) ([]Unstatused, error) {
+	_, unstatused, err := discoverContext(ctx, log)
+
+	return unstatused, err
+}
+
+// discoverContext is the single scan behind both DiscoverContext and
+// UnstatusedPools, so what counts as a master, and where the line between a
+// scrapable pool and one that only lacks a status page falls, is decided once.
+func discoverContext(ctx context.Context, log *slog.Logger) ([]Discovered, []Unstatused, error) {
 	log = logOrDiscard(log)
 
 	procs, err := process.Processes()
 	if err != nil {
-		return []Discovered{}, fmt.Errorf("failed to list processes: %w", err)
+		return []Discovered{}, nil, fmt.Errorf("failed to list processes: %w", err)
 	}
 
 	found := make([]Discovered, 0)
+	var unstatused []Unstatused
 
 	for _, p := range procs {
 		exe, config, ok := masterIdentity(p, log)
@@ -217,7 +257,18 @@ func DiscoverContext(ctx context.Context, log *slog.Logger) ([]Discovered, error
 				status = parsed.Global["pm.status_path"]
 			}
 			if status == "" {
-				log.Debug("Skipping pool with no status path", "pool", poolName, "config", config)
+				// Not dropped silently any more. A pool that only lacks a status
+				// page is one a caller can turn the page on for — and a "no pools
+				// found" that hides a running master sends the operator looking for
+				// something that is not the problem.
+				log.Debug("Found a php-fpm pool with no status path", "pool", poolName, "config", config)
+				unstatused = append(unstatused, Unstatused{
+					Name:       poolName,
+					ConfigPath: config,
+					Binary:     exe,
+					PID:        int(p.Pid),
+					Socket:     socket,
+				})
 				continue
 			}
 
@@ -245,7 +296,7 @@ func DiscoverContext(ctx context.Context, log *slog.Logger) ([]Discovered, error
 		}
 	}
 
-	return found, nil
+	return found, unstatused, nil
 }
 
 func parseSocket(socket string, log *slog.Logger) string {

@@ -1,6 +1,7 @@
 package phpfpm
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -301,6 +302,99 @@ func TestDiscoverFindsARunningMaster(t *testing.T) {
 
 	t.Errorf("a running master serving pool %q was not discovered among %d found",
 		name, len(found))
+}
+
+// TestUnstatusedPoolsFindsAPoolWithNoStatusPath is the discovery half of the
+// status-page problem. A bare php-fpm ships its pool with pm.status_path
+// commented out, so it cannot be scraped — and dropping it silently makes a
+// running master read as "no pools found", sending the operator to look for a
+// master that is up the whole time. Discover leaves it out, as it must, but
+// UnstatusedPools carries it with what a caller needs to report it and turn the
+// page on.
+func TestUnstatusedPoolsFindsAPoolWithNoStatusPath(t *testing.T) {
+	fpm := lookupFPM(t)
+
+	root := t.TempDir()
+	pools := filepath.Join(root, "pool.d")
+	if err := os.MkdirAll(pools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	port := 35000 + (os.Getpid() % 10000)
+	name := fmt.Sprintf("nostatus%d", os.Getpid())
+
+	conf := filepath.Join(root, "php-fpm.conf")
+	if err := os.WriteFile(conf, fmt.Appendf(nil,
+		"[global]\npid = %s/fpm.pid\nerror_log = %s/fpm.log\ndaemonize = yes\ninclude=%s/*.conf\n",
+		root, root, pools), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The same pool as the found test, but with NO pm.status_path — the stock
+	// default. It is a perfectly valid pool; it just cannot be scraped.
+	if err := os.WriteFile(filepath.Join(pools, name+".conf"), fmt.Appendf(nil,
+		"[%s]\nlisten = 127.0.0.1:%d\npm = dynamic\npm.max_children = 7\n"+
+			"pm.start_servers = 2\npm.min_spare_servers = 1\npm.max_spare_servers = 3\n",
+		name, port), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := exec.Command(fpm, "--fpm-config", conf).CombinedOutput(); err != nil {
+		t.Skipf("php-fpm would not start here: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		if pid, err := os.ReadFile(filepath.Join(root, "fpm.pid")); err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(string(pid))); err == nil {
+				if p, err := os.FindProcess(n); err == nil {
+					_ = p.Signal(syscall.SIGTERM)
+				}
+			}
+		}
+	})
+
+	if !waitFor(t, 10*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(root, "fpm.pid"))
+
+		return err == nil
+	}) {
+		t.Skip("php-fpm wrote no pid file")
+	}
+
+	// Discover must NOT carry a pool it cannot scrape.
+	found, err := Discover(nil)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	for _, d := range found {
+		if d.Name == name {
+			t.Errorf("Discover returned pool %q, which has no pm.status_path and cannot be scraped", name)
+		}
+	}
+
+	// UnstatusedPools must — with the master pid, config, and socket a caller
+	// needs to report it and to enable the page.
+	unstatused, err := UnstatusedPools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("UnstatusedPools: %v", err)
+	}
+	for _, u := range unstatused {
+		if u.Name != name {
+			continue
+		}
+		if u.PID <= 0 {
+			t.Errorf("the pool was found without the master pid: %+v", u)
+		}
+		if u.ConfigPath != conf {
+			t.Errorf("ConfigPath = %q, want %q", u.ConfigPath, conf)
+		}
+		if u.Socket == "" {
+			t.Errorf("the pool was found without its listen socket: %+v", u)
+		}
+
+		return
+	}
+
+	t.Errorf("a running master serving unstatused pool %q was not reported among %d unstatused",
+		name, len(unstatused))
 }
 
 // TestDiscoverMastersAnswersWhenTheConfigDoesNot is the whole point of the
