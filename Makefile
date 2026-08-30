@@ -54,12 +54,17 @@ tidy-check: ## Fail if `go mod tidy` would change go.mod or go.sum
 # Not "everything CI runs": CI also runs the suite with a real php-fpm installed,
 # which is when the control and validation tests stop skipping. A gate whose name
 # overstates it sends people to CI to be surprised by it.
-# A CycloneDX bill of materials, written to sbom.json. Deterministic: the serial
-# number is omitted and the timestamp and generator stripped, so it changes only
-# when the DEPENDENCIES change. sbom-check fails a build whose committed SBOM has
-# drifted from go.mod.
+# A CycloneDX bill of materials, written to sbom.json. Deterministic so it changes
+# only when the DEPENDENCIES change, which is what lets sbom-check fail a drifted
+# one. Three things default it away from that and are undone here: the serial
+# number, timestamp and generator that move every run; the goos/goarch stamped into
+# every purl, which differ between a developer's Mac and the Linux CI runner; and
+# the main module's own pseudo-version (…-<time>-<hash>), which changes every commit
+# so the committed file referenced the PREVIOUS one. Platform stripped, the
+# pseudo-version's timestamp-hash folded to "devel".
+SBOM_CLEAN = del(.metadata.timestamp) | del(.metadata.tools) | walk(if type == "string" then (gsub("go(os|arch)=[^&]*&"; "") | gsub("[0-9]{14}-[0-9a-f]{7,}"; "devel")) else . end)
 SBOM_GEN = cyclonedx-gomod mod -json -licenses -noserial -output - . | \
-	jq 'del(.metadata.timestamp) | del(.metadata.tools)'
+	jq '$(SBOM_CLEAN)'
 
 sbom: ## Regenerate the CycloneDX SBOM (needs cyclonedx-gomod and jq)
 	@command -v cyclonedx-gomod >/dev/null || { echo "install: go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest"; exit 1; }

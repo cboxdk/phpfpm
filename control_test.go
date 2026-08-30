@@ -427,8 +427,15 @@ func TestReloadAndWaitAcceptsAMasterThatCameBackWithANewPID(t *testing.T) {
 		t.Fatal("the pid file exists before the reload; the test would not prove anything")
 	}
 
+	// Five seconds, not two. ReloadAndWait watches the successor for the rest of
+	// the window to catch a master that dies late, so this bounds the whole call —
+	// but the failure it was flaking on was the successor's pid file not being
+	// written within the window at all: on a loaded shared runner the goroutine
+	// above can be slow to reap the old process and write the file. Two seconds
+	// was enough on a quiet laptop; five gives the runner room without making the
+	// test crawl.
 	pid, err := ReloadAndWait(context.Background(),
-		ReloadTarget{PID: dying.Process.Pid, PIDFile: pidFile}, 2*time.Second, nil)
+		ReloadTarget{PID: dying.Process.Pid, PIDFile: pidFile}, 5*time.Second, nil)
 	<-done
 
 	if err != nil {
