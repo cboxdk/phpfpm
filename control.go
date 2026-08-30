@@ -193,7 +193,18 @@ func ReloadAndWait(ctx context.Context, target ReloadTarget, settle time.Duratio
 				// successor reported success over pools that were about to go
 				// down — the exact failure the settle window exists to catch,
 				// skipped by the path added to fix a different one.
+				//
+				// The identity anchor MOVES with the pid. Without this line
+				// `started` kept the dead master's start time, so every following
+				// sameProcess(successor, started) compared the successor against a
+				// process it is not and returned false forever — the "watch the
+				// successor" branch above was never re-entered, and a perfectly good
+				// daemonized reload spun to the deadline and was reported dead. It
+				// only showed on Linux: processStartedAt returns a real start time
+				// there, while on macOS it returns 0 and sameProcess treats 0 as "no
+				// opinion", masking the bug on the machine this is developed on.
 				target.PID = pid
+				started = processStartedAt(pid)
 				continue
 			}
 			if time.Now().After(deadline) {
