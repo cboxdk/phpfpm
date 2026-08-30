@@ -170,7 +170,17 @@ func DiscoverContext(ctx context.Context, log *slog.Logger) ([]Discovered, error
 
 		parsed, err := ParseConfigContext(ctx, exe, config)
 		if err != nil {
-			log.Error("Failed to parse FPM config", "config", config, "error", err)
+			// Warn, not Error, and no full dump.
+			//
+			// A master this scan cannot parse is usually not the caller's
+			// problem: on a host running more than one php-fpm — a dev box, a
+			// multi-tenant server — every OTHER master is one this scan cannot
+			// parse, and logging each at Error with its full multi-line output
+			// buries the caller in alarming noise about processes it was not
+			// asked to manage. A caller that IS trying to repair such a master
+			// uses DiscoverMasters, which does not parse at all.
+			log.Warn("Skipping a php-fpm master whose configuration could not be parsed",
+				"config", config)
 			continue
 		}
 
