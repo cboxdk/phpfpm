@@ -1,4 +1,4 @@
-.PHONY: help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check
+.PHONY: sbom sbom-check help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -54,5 +54,22 @@ tidy-check: ## Fail if `go mod tidy` would change go.mod or go.sum
 # Not "everything CI runs": CI also runs the suite with a real php-fpm installed,
 # which is when the control and validation tests stop skipping. A gate whose name
 # overstates it sends people to CI to be surprised by it.
+# A CycloneDX bill of materials, written to sbom.json. Deterministic: the serial
+# number is omitted and the timestamp and generator stripped, so it changes only
+# when the DEPENDENCIES change. sbom-check fails a build whose committed SBOM has
+# drifted from go.mod.
+SBOM_GEN = cyclonedx-gomod mod -json -licenses -noserial -output - . | \
+	jq 'del(.metadata.timestamp) | del(.metadata.tools)'
+
+sbom: ## Regenerate the CycloneDX SBOM (needs cyclonedx-gomod and jq)
+	@command -v cyclonedx-gomod >/dev/null || { echo "install: go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest"; exit 1; }
+	$(SBOM_GEN) > sbom.json
+
+sbom-check: ## Fail if the committed SBOM is stale (CI)
+	@command -v cyclonedx-gomod >/dev/null || { echo "install: go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest"; exit 1; }
+	$(SBOM_GEN) > /tmp/sbom-fresh.json
+	@diff -u sbom.json /tmp/sbom-fresh.json || { echo "sbom.json is stale; run 'make sbom' and commit it"; exit 1; }
+	@echo "SBOM matches go.mod"
+
 check: fmt-check tidy-check vet lint test vulncheck ## Everything CI runs EXCEPT the pass with a real php-fpm installed
 	@echo "✅ All checks passed"
