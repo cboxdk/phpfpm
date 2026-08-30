@@ -1,4 +1,4 @@
-.PHONY: sbom sbom-check help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check
+.PHONY: sbom sbom-check license-check help test test-race test-coverage fmt fmt-check vet lint vulncheck check tidy tidy-check
 
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -71,5 +71,8 @@ sbom-check: ## Fail if the committed SBOM is stale (CI)
 	@diff -u sbom.json /tmp/sbom-fresh.json || { echo "sbom.json is stale; run 'make sbom' and commit it"; exit 1; }
 	@echo "SBOM matches go.mod"
 
-check: fmt-check tidy-check vet lint test vulncheck ## Everything CI runs EXCEPT the pass with a real php-fpm installed
+license-check: ## Fail if any dependency is under a non-permissive, undocumented license
+	@sh scripts/license-check.sh sbom.json
+
+check: fmt-check tidy-check vet lint test vulncheck license-check ## Everything CI runs EXCEPT the pass with a real php-fpm installed
 	@echo "✅ All checks passed"
