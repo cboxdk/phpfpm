@@ -106,7 +106,7 @@ if err != nil {
 | Find masters and their pools | `Discover` — process scan plus `php-fpm -tt`, with each pool's configured size |
 | Find masters only | `DiscoverMasters` — the same scan without parsing any configuration |
 | Parse effective configuration | `ParseConfig` / `ParseConfigContext` — global settings plus one map per pool |
-| Scrape live status | `Scrape` (one pool), `ScrapeAll` (many, concurrently) — per-pool counters, per-worker RSS |
+| Scrape live status | `Scrape` (one pool), `ScrapeAll` (many, concurrently) — per-pool counters, and per worker both its own RSS and its whole subtree's (the ffmpeg it spawned) |
 | Read opcache | `GetOpcacheStatus` |
 | Validate a configuration | `Validate` — `php-fpm -t`, without applying it |
 | Reload a master | `ReloadAndWait`, `ReloadMaster` (SIGUSR2, scoped to a named config) |
@@ -175,6 +175,12 @@ carry the pool's configured `pm.max_children` and process manager, so a caller
 holding a failed scrape still knows how large the pool is. Without it, a site
 restarting for five seconds looks like a pool needing nothing, and its memory is
 handed to its neighbours.
+
+**A pool can carry a hint the library does not interpret.** `Discovered` and
+`Target` also carry `Workload` — the value of `env[FPM_TUNE_WORKLOAD]` from the
+pool's own config, or empty. This package only surfaces it; what "web" or
+"subprocess-heavy" means is the consumer's business. The config is the one place
+a per-pool hint can live and be discovered without a second file.
 
 **No package-level logger.** Every entry point that can log takes a `*slog.Logger`.
 A library that owns a global logger cannot be embedded twice with different

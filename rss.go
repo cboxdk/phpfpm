@@ -151,10 +151,17 @@ func enrichWorkerRSS(pool *Pool, snap *processSnapshot, log *slog.Logger) {
 		}
 	}
 
-	if missing > 0 {
-		// Worth a line at debug: a scrape where MOST workers could not be read
-		// usually means the caller lacks permission to inspect another user's
-		// processes, which silently produces a pool that looks free.
+	switch {
+	case missing == len(pool.Processes) && missing > 0:
+		// EVERY worker unreadable is the dangerous case: a non-empty pool that
+		// reports zero memory looks free to a consumer that sizes pools, which is
+		// the most expensive possible misreading. The usual cause is /proc mounted
+		// hidepid while this runs as a user that cannot see the workers. Loud.
+		log.Warn("A pool's memory could not be read for ANY of its workers; it will "+
+			"look free to anything sizing it. Usually /proc hidepid or a permissions "+
+			"mismatch — run where the workers' /proc entries are readable.",
+			"pool", pool.Name, "workers", len(pool.Processes))
+	case missing > 0:
 		log.Debug("Some workers' memory could not be read",
 			"pool", pool.Name, "missing", missing, "total", len(pool.Processes))
 	}
