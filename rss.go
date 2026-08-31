@@ -1,7 +1,10 @@
 package phpfpm
 
 import (
+	"bytes"
 	"log/slog"
+	"os"
+	"strconv"
 
 	"github.com/shirou/gopsutil/v3/process"
 )
@@ -77,6 +80,54 @@ func (s *processSnapshot) rssOf(pid int32) int64 {
 	return int64(mem.RSS)
 }
 
+// pssOf reads a process's proportional set size, or 0 if it cannot be read.
+//
+// PSS lives in /proc/<pid>/smaps_rollup, a single aggregated line-per-metric view
+// the kernel has offered since 4.14. Reading another process's rollup needs
+// PTRACE_MODE_READ — the same user, or root — which is exactly what fpm-tune has
+// over the workers it manages; anything less, an older kernel, or a worker that
+// exited returns 0, and the caller falls back to RSS. Read directly rather than
+// through gopsutil, which does not surface PSS portably. On a non-Linux host the
+// path does not exist and this is a no-op.
+func pssOf(pid int) int64 {
+	if pid <= 0 {
+		return 0
+	}
+
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/smaps_rollup")
+	if err != nil {
+		return 0
+	}
+
+	return parsePSSBytes(data)
+}
+
+// parsePSSBytes pulls the total Pss out of a smaps_rollup body and returns it in
+// bytes. The rollup carries a bare "Pss:" line plus "Pss_Anon:", "Pss_File:" and
+// "Pss_Shmem:" breakdowns; only the bare "Pss:" is the total, so the prefix match
+// is exact. Returns 0 if the line is absent or unparseable.
+func parsePSSBytes(data []byte) int64 {
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if !bytes.HasPrefix(line, []byte("Pss:")) {
+			continue
+		}
+
+		fields := bytes.Fields(line[len("Pss:"):])
+		if len(fields) == 0 {
+			return 0
+		}
+
+		kb, err := strconv.ParseInt(string(fields[0]), 10, 64)
+		if err != nil {
+			return 0
+		}
+
+		return kb * 1024
+	}
+
+	return 0
+}
+
 // subtreeRSS sums the resident memory of pid and every process descended from
 // it — the worker and everything it spawned.
 //
@@ -141,6 +192,14 @@ func enrichWorkerRSS(pool *Pool, snap *processSnapshot, log *slog.Logger) {
 
 		own := int64(mem.RSS)
 		pool.Processes[i].CurrentRSS = own
+
+		// PSS alongside RSS, for the caller that sizes a pool: RSS charges every
+		// shared page (opcache, libraries, still-CoW parent pages) in full to each
+		// worker, so summing it across a pool multiplies the shared segment by the
+		// worker count. PSS divides each shared page by its sharers, so the sum is
+		// what the workers really cost. Zero when the rollup cannot be read, and the
+		// caller falls back to RSS.
+		pool.Processes[i].CurrentPSS = pssOf(pid)
 
 		if snap != nil {
 			subtree := snap.subtreeRSS(int32(pid))

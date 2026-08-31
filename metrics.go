@@ -41,6 +41,19 @@ type PoolProcess struct {
 	// response and the lookup.
 	CurrentRSS int64 `json:"current_rss"`
 
+	// CurrentPSS is the worker's proportional set size, in bytes: like CurrentRSS,
+	// but every shared page (the opcache SHM segment, shared libraries, the pages
+	// still copy-on-write from the master) is divided by the number of processes
+	// mapping it rather than charged in full to each. Summing PSS across a pool's
+	// workers yields the memory those workers actually cost the host; summing RSS
+	// double-counts everything shared. Read from /proc/<pid>/smaps_rollup.
+	//
+	// Zero means it could not be read: a kernel without smaps_rollup (pre-4.14), a
+	// permission short of PTRACE_MODE_READ, or the worker having exited. A consumer
+	// sizing a pool should prefer CurrentPSS when it is non-zero and fall back to
+	// CurrentRSS otherwise.
+	CurrentPSS int64 `json:"current_pss"`
+
 	// SubtreeRSS is the resident memory of the worker AND every process it
 	// spawned — the ffmpeg or imagemagick a request shelled out to, each a
 	// separate pid the status page and CurrentRSS both miss. It is always at
