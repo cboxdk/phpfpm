@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/cboxdk/fcgx"
 )
 
 // serverSoftware is what PHP-FPM records for requests this library makes. It
@@ -228,58 +226,13 @@ func scrape(ctx context.Context, target Target, snap *processSnapshot, log *slog
 		Global:    make(map[string]string),
 	}
 
-	scheme, address, path, err := ParseAddress(target.statusAddress(), target.StatusPath)
-	if err != nil {
-		outcome.Err = fmt.Errorf("invalid FPM socket address: %w", err)
-		return outcome
-	}
-
-	// The timeout bounds the whole exchange, not just the dial. It used to cover
-	// the connect and then hand the parent context — often context.Background()
-	// — to the request, so a server that accepted the socket and never sent
-	// END_REQUEST hung the scrape indefinitely. A pool being scraped is a pool
-	// that is unwell often enough for that to matter.
 	ctx, cancel := context.WithTimeout(ctx, target.dialTimeout())
 	defer cancel()
-
-	log.Debug("Dialing FastCGI", "scheme", scheme, "address", address, "status_path", path)
-	client, err := fcgx.DialContext(ctx, scheme, address)
+	pool, err := readStatus(ctx, target, log)
 	if err != nil {
-		outcome.Err = fmt.Errorf("failed to dial FastCGI: %w", err)
-		return outcome
-	}
-	defer func() { _ = client.Close() }()
-
-	env := map[string]string{
-		"SCRIPT_FILENAME": path,
-		"SCRIPT_NAME":     path,
-		"SERVER_SOFTWARE": serverSoftware,
-		"REMOTE_ADDR":     "127.0.0.1",
-		"QUERY_STRING":    "json&full",
-	}
-	log.Debug("Sending FCGI request", "env", env)
-
-	resp, err := client.Get(ctx, env)
-	if err != nil {
-		outcome.Err = fmt.Errorf("fcgi GET failed: %w", err)
-		return outcome
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	var pool Pool
-	if err := fcgx.ReadJSON(resp, &pool); err != nil {
-		outcome.Err = fmt.Errorf("failed to parse FPM status JSON: %w", err)
-		return outcome
-	}
-
-	if err := checkIsStatusFor(pool.Name, target.Name, path); err != nil {
 		outcome.Err = err
-
 		return outcome
 	}
-
-	pool.Address = address
-	pool.Path = path
 	// The CALLER's context, not a background thirty seconds of this package's
 	// own. A scrape given a two-second budget could sit here for thirty inside a
 	// call it made — so a wedged binary stopped a loop that had explicitly said

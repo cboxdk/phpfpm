@@ -99,3 +99,27 @@ statistics, not the script-path inventory. This avoids collecting paths that the
 library discards anyway. It still executes a FastCGI request in the target FPM
 instance. Consumers managing sleeping/checkpointed workloads must coordinate that
 request with their runtime lifecycle; this library does not wake or fence workloads.
+
+## Native status without PHP probes (unreleased)
+
+`ReadStatus(ctx, target)` reads only the configured native FPM status page with
+`json&full`. It uses the same socket selection, pool-name validation and bounded
+FastCGI transport as ordinary scraping. It does not execute PHP-info or OPcache
+scripts, inspect `/proc`, parse configuration or invoke an FPM binary.
+
+```go
+pool, err := phpfpm.ReadStatus(ctx, phpfpm.Target{
+    Name: "www", Socket: "tcp://127.0.0.1:9000",
+    StatusPath: "/status", Timeout: time.Second,
+})
+```
+
+Counters and worker states are returned exactly as FPM reports them. In
+particular, the worker serving this status request is not subtracted from active
+workers. A worker in `Finishing` may still be executing PHP after sending its
+response. This method does not declare the workload safe to checkpoint: callers
+must exclude new admissions, account for every pool and worker, reject unavailable
+or incomplete status, and establish their lifecycle guarantees separately.
+Configure a native FPM status endpoint; an arbitrary PHP endpoint returning JSON
+is not a trusted substitute. `Scrape` and `ScrapeAll` still perform their existing
+enrichment and share this native-status implementation.
