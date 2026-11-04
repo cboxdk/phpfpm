@@ -8,6 +8,50 @@ import (
 	"testing"
 )
 
+func TestOpcacheEpochsSurviveNativeJSONRoundTrip(t *testing.T) {
+	for _, restart := range []string{"0", "1793790300"} {
+		body := []byte(`{"opcache_enabled":true,"opcache_statistics":{"start_time":1793790000,"last_restart_time":` + restart + `}}`)
+		status, err := parseOpcacheStatus(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result struct {
+			Statistics map[string]uint64 `json:"opcache_statistics"`
+		}
+		if err := json.Unmarshal(encoded, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Statistics["start_time"] != 1793790000 {
+			t.Fatalf("start time lost: %s", encoded)
+		}
+		want := uint64(0)
+		if restart != "0" {
+			want = 1793790300
+		}
+		if got, present := result.Statistics["last_restart_time"]; !present || got != want {
+			t.Fatalf("restart time lost: %s", encoded)
+		}
+	}
+}
+
+func TestOpcacheMissingEpochsAreNotInvented(t *testing.T) {
+	status, err := parseOpcacheStatus([]byte(`{"opcache_enabled":true,"opcache_statistics":{"hits":42}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "start_time") || strings.Contains(string(encoded), "last_restart_time") {
+		t.Fatalf("missing epochs were invented: %s", encoded)
+	}
+}
+
 // Only an explicit cache-state object can establish that the cache is disabled.
 func TestParseOpcacheStatusHandlesDisabled(t *testing.T) {
 	for _, body := range []string{`{"opcache_enabled":false}`, "  {\"opcache_enabled\":false}\n"} {

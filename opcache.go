@@ -25,6 +25,10 @@ type Memory struct {
 }
 
 type Stats struct {
+	// Optional timestamps distinguish old/missing observations from PHP's
+	// explicit last_restart_time=0 (the cache has never restarted).
+	StartTime        *uint64 `json:"start_time,omitempty"`
+	LastRestartTime  *uint64 `json:"last_restart_time,omitempty"`
 	NumCachedScripts uint64  `json:"num_cached_scripts"`
 	Hits             uint64  `json:"hits"`
 	Misses           uint64  `json:"misses"`
