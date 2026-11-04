@@ -90,6 +90,7 @@ type Pool struct {
 	ProcessesCpu        *float64          `json:"processes_cpu"`
 	ProcessesMemory     *float64          `json:"processes_memory"`
 	Config              map[string]string `json:"config,omitempty"`
+	OpcacheObserved     bool              `json:"opcache_observed"`
 	OpcacheStatus       OpcacheStatus     `json:"opcache_status,omitempty"`
 	PhpInfo             Info              `json:"php_info,omitempty"`
 }
@@ -326,6 +327,7 @@ func scrape(ctx context.Context, target Target, snap *processSnapshot, log *slog
 	opcacheStatus, err := GetOpcacheStatus(ctx, target)
 	if err == nil && opcacheStatus != nil {
 		pool.OpcacheStatus = *opcacheStatus
+		pool.OpcacheObserved = true
 	} else {
 		log.Debug("failed to get Opcache info", "error", err)
 	}

@@ -11,10 +11,10 @@ permissions:
 
 env:
   # Pinned to the patch, not the minor. `1.26.x` can resolve to a toolchain
-  # that still ships standard-library advisories -- go1.26.6 fixes four that
-  # govulncheck reports against 1.26.5. Bump this when the scan fails on the
+  # that still ships standard-library advisories -- go1.26.10 fixes the
+  # reachable standard-library advisories reported against 1.26.6. Bump this when the scan fails on the
   # standard library: that is the gate working.
-  GO_VERSION: '1.26.6'
+  GO_VERSION: '1.26.10'
 
 jobs:
   test:

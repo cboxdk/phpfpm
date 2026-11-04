@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/cboxdk/fcgx"
@@ -51,7 +50,7 @@ error_reporting(0);
 ini_set('display_errors', 0);
 header("Status: 200 OK");
 header("Content-Type: application/json");
-echo json_encode(opcache_get_status());
+echo json_encode(opcache_get_status(false));
 exit;`
 
 var (
@@ -167,21 +166,22 @@ func GetOpcacheStatus(ctx context.Context, target Target) (*OpcacheStatus, error
 	return parseOpcacheStatus(body)
 }
 
-// parseOpcacheStatus turns an opcache_get_status() response into a status.
-//
-// opcache_get_status() returns false when OPcache is disabled — for this SAPI, or
-// not compiled in. json_encode(false) is the literal `false`, not an object, so
-// unmarshalling it into the struct fails: that is treated as "disabled" rather than
-// a parse error, or a host without OPcache logs a failure on every scrape.
+// parseOpcacheStatus requires an explicit cache-state object. PHP returns false
+// on failure as well as for a disabled cache; that alone cannot prove "disabled".
+// Empty/null responses must likewise remain unavailable, not become zero usage.
 func parseOpcacheStatus(body []byte) (*OpcacheStatus, error) {
-	if trimmed := strings.TrimSpace(string(body)); trimmed == "false" || trimmed == "null" || trimmed == "" {
-		return &OpcacheStatus{}, nil
+	var state struct {
+		Enabled *bool `json:"opcache_enabled"`
 	}
-
+	if err := json.Unmarshal(body, &state); err != nil {
+		return nil, fmt.Errorf("failed to parse opcache JSON: %w", err)
+	}
+	if state.Enabled == nil {
+		return nil, fmt.Errorf("opcache response contains no explicit cache state")
+	}
 	var status OpcacheStatus
 	if err := json.Unmarshal(body, &status); err != nil {
 		return nil, fmt.Errorf("failed to parse opcache JSON: %w", err)
 	}
-
 	return &status, nil
 }

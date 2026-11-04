@@ -2,7 +2,7 @@ module github.com/cboxdk/phpfpm
 
 go 1.26.0
 
-toolchain go1.26.6
+toolchain go1.26.10
 
 require (
 	github.com/cboxdk/fcgx v1.2.0

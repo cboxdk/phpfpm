@@ -8,12 +8,9 @@ import (
 	"testing"
 )
 
-// TestParseOpcacheStatusHandlesDisabled: opcache_get_status() returns `false` when
-// OPcache is off for this SAPI. That is a normal state, not a parse error — a host
-// without OPcache used to log "failed to parse opcache JSON: cannot unmarshal bool"
-// on every scrape.
+// Only an explicit cache-state object can establish that the cache is disabled.
 func TestParseOpcacheStatusHandlesDisabled(t *testing.T) {
-	for _, body := range []string{"false", "null", "  false\n", ""} {
+	for _, body := range []string{`{"opcache_enabled":false}`, "  {\"opcache_enabled\":false}\n"} {
 		status, err := parseOpcacheStatus([]byte(body))
 		if err != nil {
 			t.Errorf("parseOpcacheStatus(%q) errored on a disabled opcache: %v", body, err)
@@ -38,8 +35,7 @@ func TestParseOpcacheStatusReadsAnEnabledStatus(t *testing.T) {
 	}
 }
 
-// TestParseOpcacheStatusStillRejectsGarbage: only false/null/empty are "disabled";
-// a truncated object is still an error worth seeing.
+// Truncated output is unavailable, not a disabled cache.
 func TestParseOpcacheStatusStillRejectsGarbage(t *testing.T) {
 	if _, err := parseOpcacheStatus([]byte(`{"opcache_enabled":`)); err == nil {
 		t.Error("a truncated opcache response was accepted")
@@ -372,7 +368,7 @@ func TestGetOpcacheStatus_ScriptCreation(t *testing.T) {
 		"ini_set('display_errors', 0)",
 		"header(\"Status: 200 OK\")",
 		"header(\"Content-Type: application/json\")",
-		"echo json_encode(opcache_get_status())",
+		"echo json_encode(opcache_get_status(false))",
 		"exit;",
 	}
 
@@ -528,5 +524,16 @@ func TestOpcacheStatus_LargeValues(t *testing.T) {
 	actualHitRate := unmarshaledStatus.Statistics.HitRate
 	if actualHitRate < expectedHitRate-0.000001 || actualHitRate > expectedHitRate+0.000001 {
 		t.Errorf("HitRate precision lost: expected ~%f, got %f", expectedHitRate, actualHitRate)
+	}
+}
+
+func TestParseOpcacheStatusRejectsUnavailableState(t *testing.T) {
+	for _, body := range []string{"", "null", "false", "true", "[]", "{}", `{"opcache_enabled":null}`, `{"opcache_enabled":"false"}`} {
+		t.Run(body, func(t *testing.T) {
+			status, err := parseOpcacheStatus([]byte(body))
+			if err == nil || status != nil {
+				t.Fatalf("unavailable response %q became cache state: %+v, %v", body, status, err)
+			}
+		})
 	}
 }

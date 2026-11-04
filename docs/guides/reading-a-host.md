@@ -78,3 +78,24 @@ from the operating system using the pids the status page provides. A pool with n
 status page enabled therefore has counters but no per-worker RSS. Only the pool
 that the status response actually names is used — a status endpoint claiming to
 be a different pool is refused, not relabelled.
+
+## OPcache observation quality
+
+Check `Pool.OpcacheObserved` before using `Pool.OpcacheStatus`. A successful FPM
+status scrape does not guarantee the separate OPcache probe succeeded. On probe
+failure, `OpcacheObserved` is false and the zero-value status is not evidence that
+OPcache is disabled. Consumers should omit cache measurements and report the missing
+observation separately. Do not fill gaps with zero memory or zero hit rate.
+
+`GetOpcacheStatus` now rejects empty, null, false and objects without an explicit
+boolean `opcache_enabled` field. This tightens its former behavior: false/null/empty
+were previously treated as disabled. PHP documents `false` as a failure result,
+including restricted access; it cannot alone prove a disabled cache. An explicit
+`{"opcache_enabled":false}` object remains a readable disabled state.
+See the [PHP return-value contract](https://www.php.net/manual/en/function.opcache-get-status.php).
+
+The generated probe requests `opcache_get_status(false)`: it needs aggregate cache
+statistics, not the script-path inventory. This avoids collecting paths that the
+library discards anyway. It still executes a FastCGI request in the target FPM
+instance. Consumers managing sleeping/checkpointed workloads must coordinate that
+request with their runtime lifecycle; this library does not wake or fence workloads.
