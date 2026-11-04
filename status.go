@@ -54,11 +54,27 @@ func readStatus(ctx context.Context, target Target, log *slog.Logger) (Pool, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	var pool Pool
-	if err := fcgx.ReadJSON(resp, &pool); err != nil {
+	// Pointers distinguish a measured zero from an omitted/null field. Lifecycle
+	// callers must never interpret an unavailable queue or worker list as idle.
+	var payload struct {
+		Pool
+		Active  *int64         `json:"active processes"`
+		Idle    *int64         `json:"idle processes"`
+		Total   *int64         `json:"total processes"`
+		Queue   *int64         `json:"listen queue"`
+		Workers *[]PoolProcess `json:"processes"`
+	}
+	if err := fcgx.ReadJSON(resp, &payload); err != nil {
 		return Pool{}, fmt.Errorf("failed to parse FPM status JSON: %w", err)
 	}
 
+	if payload.Active == nil || payload.Idle == nil || payload.Total == nil || payload.Queue == nil || payload.Workers == nil {
+		return Pool{}, fmt.Errorf("FPM full status is missing required worker or queue fields")
+	}
+	pool := payload.Pool
+	pool.ActiveProcesses, pool.IdleProcesses = *payload.Active, *payload.Idle
+	pool.TotalProcesses, pool.ListenQueue = *payload.Total, *payload.Queue
+	pool.Processes = *payload.Workers
 	if err := checkIsStatusFor(pool.Name, target.Name, path); err != nil {
 		return Pool{}, err
 	}

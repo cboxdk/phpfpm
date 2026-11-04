@@ -2,6 +2,7 @@ package phpfpm
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -54,7 +55,7 @@ func TestReadStatusDoesNotRunPHPEnrichmentOrRewriteWorkerCounts(t *testing.T) {
 }
 
 func TestReadStatusRejectsInvalidAndForeignResponses(t *testing.T) {
-	for _, body := range []string{`{}`, `{"pool":"foreign"}`, `not json`} {
+	for _, body := range []string{`{}`, `{"pool":"foreign","active processes":0,"idle processes":0,"total processes":0,"listen queue":0,"processes":[]}`, `not json`} {
 		t.Run(body, func(t *testing.T) {
 			address := statusServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }))
 			if _, err := ReadStatus(context.Background(), Target{Name: "www", Socket: address, StatusPath: "/status"}); err == nil {
@@ -74,5 +75,41 @@ func TestReadStatusHonorsDeadline(t *testing.T) {
 	}
 	if time.Since(started) > time.Second {
 		t.Fatal("status exchange exceeded its deadline")
+	}
+}
+
+func TestReadStatusRequiresObservedQueueAndWorkerFields(t *testing.T) {
+	for _, field := range []string{"active processes", "idle processes", "total processes", "listen queue", "processes"} {
+		for _, null := range []bool{false, true} {
+			name := field + " missing"
+			if null {
+				name = field + " null"
+			}
+			t.Run(name, func(t *testing.T) {
+				document := map[string]any{"pool": "www", "active processes": 1, "idle processes": 0, "total processes": 1, "listen queue": 0, "processes": []map[string]any{{"pid": 10, "state": "Running", "request method": "GET", "request uri": "/status?json&full"}}}
+				if null {
+					document[field] = nil
+				} else {
+					delete(document, field)
+				}
+				address := statusServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					if err := json.NewEncoder(w).Encode(document); err != nil {
+						t.Error(err)
+					}
+				}))
+				if _, err := ReadStatus(context.Background(), Target{Name: "www", Socket: address, StatusPath: "/status"}); err == nil {
+					t.Fatal("missing observation was accepted as a measured value")
+				}
+			})
+		}
+	}
+	// A real zero queue and a fully idle native snapshot are valid observations;
+	// the checkpoint consumer separately decides whether this status model fits.
+	address := statusServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"pool":"www","active processes":0,"idle processes":0,"total processes":0,"listen queue":0,"processes":[]}`)
+	}))
+	pool, err := ReadStatus(context.Background(), Target{Name: "www", Socket: address, StatusPath: "/status"})
+	if err != nil || pool.ListenQueue != 0 || pool.Processes == nil {
+		t.Fatalf("explicit empty observation rejected: %+v, %v", pool, err)
 	}
 }

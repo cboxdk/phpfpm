@@ -123,3 +123,10 @@ or incomplete status, and establish their lifecycle guarantees separately.
 Configure a native FPM status endpoint; an arbitrary PHP endpoint returning JSON
 is not a trusted substitute. `Scrape` and `ScrapeAll` still perform their existing
 enrichment and share this native-status implementation.
+
+The full-status decoder rejects missing or null active/idle/total counters,
+listen-queue depth and worker lists. A missing queue measurement is not a zero
+queue. Explicit numeric zeros and an explicit empty worker list remain valid
+observations; a lifecycle consumer must separately decide whether they satisfy
+its quiescence model. This validation also applies to ordinary enriched scraping,
+which shares the status reader.
